@@ -444,3 +444,172 @@ where
         total += n as u64;
     }
 }
+
+/// One direction of a [`copy_bidirectional`] relay: reads from `reader`
+/// into an internal buffer and writes it out to `writer`, tracking EOF
+/// and the running byte count across however many separate polls that
+/// takes. Kept as its own state machine (rather than reusing [`copy`]'s
+/// simple loop directly) so `copy_bidirectional` can drive *two* of
+/// these concurrently from one `poll_fn`, instead of needing two
+/// separately spawned tasks.
+struct CopyBuffer {
+    read_done: bool,
+    pos: usize,
+    cap: usize,
+    amt: u64,
+    buf: Box<[u8]>,
+}
+
+impl CopyBuffer {
+    fn new() -> Self {
+        CopyBuffer {
+            read_done: false,
+            pos: 0,
+            cap: 0,
+            amt: 0,
+            buf: vec![0u8; 8192].into_boxed_slice(),
+        }
+    }
+
+    /// Drives this direction as far as it can go without blocking:
+    /// refills the buffer from `reader` when empty, drains it into
+    /// `writer`, and -- once `reader` has hit EOF and everything's been
+    /// written -- shuts `writer` down and resolves with the total byte
+    /// count. `Pending` at any step propagates immediately, so a single
+    /// call only ever makes forward progress up to the next thing that
+    /// isn't ready yet.
+    fn poll_copy<R, W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        mut reader: Pin<&mut R>,
+        mut writer: Pin<&mut W>,
+    ) -> Poll<io::Result<u64>>
+    where
+        R: AsyncRead + ?Sized,
+        W: AsyncWrite + ?Sized,
+    {
+        loop {
+            if self.pos == self.cap && !self.read_done {
+                let mut read_buf = ReadBuf::new(&mut self.buf);
+                match reader.as_mut().poll_read(cx, &mut read_buf) {
+                    Poll::Ready(Ok(())) => {
+                        let n = read_buf.filled().len();
+                        if n == 0 {
+                            self.read_done = true;
+                        } else {
+                            self.pos = 0;
+                            self.cap = n;
+                        }
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            while self.pos < self.cap {
+                match writer
+                    .as_mut()
+                    .poll_write(cx, &self.buf[self.pos..self.cap])
+                {
+                    Poll::Ready(Ok(0)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "write zero byte into writer",
+                        )));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        self.pos += n;
+                        self.amt += n as u64;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            if self.pos == self.cap && self.read_done {
+                match writer.as_mut().poll_shutdown(cx) {
+                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(self.amt)),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+/// Wraps a [`CopyBuffer`] with an explicit terminal state, so that once
+/// a direction has resolved `Ready(Ok(amt))` it's never polled again --
+/// required here specifically because [`copy_bidirectional`]'s combined
+/// `poll_fn` polls *both* directions on every wake regardless of which
+/// one woke it, and re-polling a `CopyBuffer` that already finished
+/// would re-enter its "reader hit EOF, everything's written" branch and
+/// call `poll_shutdown` on the writer a second time -- which, once the
+/// peer has since fully closed *its* side too, can itself fail (e.g.
+/// `ENOTCONN`), incorrectly turning an already-successful direction into
+/// an error. A `Future` isn't supposed to be polled again after
+/// returning `Ready` for exactly this kind of reason; this just makes
+/// that guarantee explicit instead of relying on it by convention.
+enum TransferState {
+    Running(CopyBuffer),
+    Done(u64),
+}
+
+impl TransferState {
+    fn poll<R, W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        reader: Pin<&mut R>,
+        writer: Pin<&mut W>,
+    ) -> Poll<io::Result<u64>>
+    where
+        R: AsyncRead + ?Sized,
+        W: AsyncWrite + ?Sized,
+    {
+        match self {
+            TransferState::Running(buf) => match buf.poll_copy(cx, reader, writer) {
+                Poll::Ready(Ok(amt)) => {
+                    *self = TransferState::Done(amt);
+                    Poll::Ready(Ok(amt))
+                }
+                other => other,
+            },
+            TransferState::Done(amt) => Poll::Ready(Ok(*amt)),
+        }
+    }
+}
+
+/// Drives both directions of an `a`<->`b` relay concurrently from one
+/// future -- what a proxy/relay use case (forwarding one connection to
+/// another) needs, instead of hand-writing two separately `spawn`ed
+/// [`copy`] calls plus your own half-close coordination. Each direction
+/// shuts down its writer independently, as soon as *that* direction's
+/// own reader hits EOF, rather than tearing down the whole relay the
+/// instant either side finishes -- e.g. a client that's done sending
+/// but still expects a response keeps that response direction alive
+/// until the server closes its own end too.
+///
+/// Resolves once both directions have finished (returning `(a_to_b,
+/// b_to_a)` byte counts), or as soon as either direction hits an error
+/// (which propagates immediately, without waiting for the other
+/// direction to finish first).
+pub async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let mut a_to_b = TransferState::Running(CopyBuffer::new());
+    let mut b_to_a = TransferState::Running(CopyBuffer::new());
+    std::future::poll_fn(|cx| {
+        let a_to_b_result = a_to_b.poll(cx, Pin::new(&mut *a), Pin::new(&mut *b));
+        let b_to_a_result = b_to_a.poll(cx, Pin::new(&mut *b), Pin::new(&mut *a));
+
+        match (a_to_b_result, b_to_a_result) {
+            (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => Poll::Ready(Err(e)),
+            (Poll::Ready(Ok(a_to_b_amt)), Poll::Ready(Ok(b_to_a_amt))) => {
+                Poll::Ready(Ok((a_to_b_amt, b_to_a_amt)))
+            }
+            _ => Poll::Pending,
+        }
+    })
+    .await
+}

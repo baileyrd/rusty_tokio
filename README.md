@@ -170,6 +170,26 @@ rustils' API can't support them yet.
   not-yet-flushed bytes are silently lost) -- the same caveat tokio's
   own carries.
 
+  Also `copy_bidirectional(a, b)`, for a proxy/relay use case (forwarding
+  one connection to another) that needs both directions of an `AsyncRead
+  + AsyncWrite` pair copied concurrently, instead of hand-writing two
+  separately `spawn`ed `copy` calls plus your own half-close
+  coordination. Each direction shuts its writer down independently, as
+  soon as *that* direction's own reader hits EOF -- e.g. a client that's
+  done sending but still expects a response keeps that response
+  direction alive until the server closes its own end too -- and an
+  error on either direction propagates immediately rather than waiting
+  for the other to finish first. Internally, each direction's own
+  little copy-loop state machine (reused across however many separate
+  polls a single `poll_fn` call takes) is wrapped with an explicit
+  "already done" terminal state once it resolves, specifically because
+  the combined `poll_fn` polls *both* directions on every wake --
+  without that, a direction that had already finished would get
+  re-entered and call `poll_shutdown` on its writer a second time,
+  which can itself fail once the peer has since fully closed its side
+  too (an already-successful direction spuriously turning into an
+  error), a real bug this crate's own test suite caught before merging.
+
   **This crate's macOS integration has never run on real hardware.**
   It's developed and tested on Linux only; the kqueue reactor and the
   `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of rustils'

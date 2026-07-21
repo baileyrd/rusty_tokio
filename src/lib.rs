@@ -53,7 +53,10 @@
 //!   of any of the above -- this crate's own sockets are unbuffered by
 //!   design (see `AsyncWrite::poll_flush`'s docs), so these are how a
 //!   protocol that wants to read a line at a time or batch small writes
-//!   adds that itself.
+//!   adds that itself. Also [`io::copy_bidirectional`], for a
+//!   proxy/relay use case that needs both directions of an `AsyncRead +
+//!   AsyncWrite` pair copied concurrently from one future, each shutting
+//!   its writer down independently as soon as its own reader hits EOF.
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
