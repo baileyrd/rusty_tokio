@@ -1,0 +1,65 @@
+//! `rusty_tokio` -- a hand-rolled async runtime, built from scratch on
+//! top of nothing but `std` and raw `libc` syscalls (no `mio`, no
+//! `tokio`, no `crossbeam`). It has four pieces, one module each:
+//!
+//! - [`task`]: a heap-allocated future plus an atomic state machine
+//!   that decides, on every wake, whether to (re-)enqueue it -- see
+//!   that module's docs for why a naive "channel of `Arc<Task>`"
+//!   design has a real lost-wakeup bug under multi-threaded execution.
+//! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
+//!   with its own run queue, backed by a shared injector queue and
+//!   able to steal from one another.
+//! - [`io`]: an `epoll`-backed reactor plus non-blocking `TcpStream` /
+//!   `TcpListener` / `UdpSocket`.
+//! - [`time`]: a timer-wheel-ish background thread for `sleep`,
+//!   `timeout`, and `interval`.
+//! - [`sync`]: `Notify`, an async `Mutex`, `oneshot`, and bounded `mpsc`
+//!   -- the primitives above are usually enough to build everything
+//!   else on top of.
+//!
+//! # Deliberately out of scope (for now)
+//!
+//! This is a real, working runtime, not a toy -- but it's also honest
+//! about its edges rather than papering over them:
+//!
+//! - **Linux only.** The reactor is built directly on `epoll`,
+//!   `eventfd`, and `accept4`. Porting to macOS/BSD (`kqueue`) or
+//!   Windows (IOCP) would mean a second reactor backend behind the same
+//!   `ScheduledIo` interface -- doable, not done.
+//! - **No `AsyncRead`/`AsyncWrite` trait ecosystem interop.** `TcpStream`
+//!   exposes plain inherent `async fn read`/`write` rather than the
+//!   trait pair the wider ecosystem (and codecs/framing crates) expect.
+//! - **No `spawn_blocking` / blocking thread pool.** A task that calls a
+//!   genuinely blocking syscall stalls the worker thread it's running
+//!   on; there's no escape hatch to offload that onto a separate pool
+//!   yet.
+//! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
+//!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
+//!   actually uses) would scale better under heavy contention.
+//! - **No `io_uring`.** Would remove a syscall per I/O operation but is
+//!   a materially different reactor design.
+
+pub mod io;
+pub mod sync;
+pub mod task;
+pub mod time;
+
+mod runtime;
+
+pub use runtime::{Builder, Handle, Runtime};
+pub use task::{JoinError, JoinHandle};
+
+use std::future::Future;
+
+/// Spawn a future onto the currently running runtime's worker pool.
+///
+/// # Panics
+/// Panics if called from a thread with no ambient runtime -- i.e.
+/// outside a `Runtime::block_on` call or a task already running on one.
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    Handle::current().spawn(future)
+}
