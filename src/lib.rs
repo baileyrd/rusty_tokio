@@ -29,9 +29,12 @@
 //!   pair for generic code (`copy`, codecs, adapters).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`.
-//! - [`sync`]: `Notify`, an async `Mutex`, `oneshot`, and bounded `mpsc`
-//!   -- the primitives above are usually enough to build everything
-//!   else on top of.
+//! - [`sync`]: `Notify`, an async `Mutex`/`RwLock`, `Semaphore`,
+//!   `oneshot`, `watch`, and bounded/unbounded `mpsc` -- the primitives
+//!   above are usually enough to build everything else on top of.
+//! - [`select!`]: race two to five futures, running whichever resolves
+//!   first and dropping the rest -- see that macro's own docs for
+//!   exactly what's (and isn't) supported.
 //!
 //! # Deliberately out of scope (for now)
 //!
@@ -108,6 +111,7 @@ pub mod sync;
 pub mod task;
 pub mod time;
 
+mod macros;
 mod runtime;
 
 pub use runtime::{Builder, Handle, Runtime};

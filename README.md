@@ -65,10 +65,10 @@ rustils' API can't support them yet.
   off. `shutdown_timeout` additionally waits (bounded) for every
   outstanding task and the blocking pool to finish naturally before
   falling back to the same abrupt teardown `drop`/`shutdown_background`
-  give; `shutdown_background` never waits at all. This crate has no
-  `select!` macro, so racing `shutdown_notified()` against a task's own
-  ongoing work (rather than awaiting it as the task's entire body) has no
-  built-in way to do so yet.
+  give; `shutdown_background` never waits at all. Racing
+  `shutdown_notified()` against a task's own ongoing work (rather than
+  awaiting it as the task's entire body) can now be done with `select!`
+  -- see below.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
   `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
   backends behind the same interface
@@ -149,6 +149,22 @@ rustils' API can't support them yet.
   shutdown been requested"-shaped state -- the same shape
   `Handle::shutdown_notified`/`is_shutting_down` hand-rolled as a
   one-off special case before this existed.
+- **`select!`**: race two to five futures, running whichever resolves
+  first and dropping (cancelling) the rest -- `rusty_tokio::select! { pat
+  = future => body, ... }`. Deliberately scoped rather than a full
+  reimplementation of tokio's macro: exactly 2 through 5 branches
+  (`macro_rules!` has no clean way to generate a fresh binding per
+  repetition on stable Rust without either a `paste!`-style proc-macro
+  dependency or a recursive tt-muncher, and explicit enumeration is more
+  legible for a macro this central); every branch's pattern must be
+  irrefutable (a plain binding or `_`, not `Some(x)`/`Ok(v)` -- tokio's
+  own macro lets a non-matching value fall through to re-poll just that
+  branch, which needs more machinery than a first pass takes on); and
+  branches are always polled in the order written, not tokio's
+  randomized order, so if two are simultaneously and permanently ready
+  the earlier one always wins (no starvation protection for that case).
+  No `else` branch, no `,if <condition>` guards, no biased mode. See the
+  macro's own doc comment for the full scope statement.
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker
