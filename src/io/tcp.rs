@@ -2,7 +2,6 @@ use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
 use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
-use platform_linux::{LinuxTcpListener, LinuxTcpStream};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
@@ -10,10 +9,26 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// A non-blocking, epoll-driven TCP listener, backed by rustils'
-/// `LinuxTcpListener` for bind/accept/addressing.
+// `PlatformTcpListener`/`PlatformTcpStream` are the only OS-specific
+// names in this file: on Linux, rustils' concrete types (bind/accept/
+// addressing/`set_nodelay` all come from there -- see `socket/mod.rs`'s
+// docs for what's still hand-rolled even on Linux); on macOS/BSD (no
+// rustils backend to build on), this crate's own hand-rolled
+// `socket::macos` shim types, shaped to match. Everything below this
+// point is identical logic regardless of which one it is.
+#[cfg(target_os = "linux")]
+use platform::net::{TcpListener as _, TcpStream as _};
+#[cfg(target_os = "linux")]
+use platform_linux::{
+    LinuxTcpListener as PlatformTcpListener, LinuxTcpStream as PlatformTcpStream,
+};
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use super::socket::{MacosTcpListener as PlatformTcpListener, MacosTcpStream as PlatformTcpStream};
+
+/// A non-blocking, epoll-driven TCP listener.
 pub struct TcpListener {
-    inner: LinuxTcpListener,
+    inner: PlatformTcpListener,
     io: Arc<ScheduledIo>,
     reactor: Arc<Reactor>,
 }
@@ -26,9 +41,9 @@ impl TcpListener {
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
         let reactor = Handle::current().shared.reactor.clone();
-        let inner = LinuxTcpListener::bind(addr).map_err(from_platform_err)?;
-        // rustils creates the listener blocking; flip it non-blocking
-        // before it's ever registered with epoll or accepted from.
+        let inner = PlatformTcpListener::bind(addr).map_err(from_platform_err)?;
+        // The listener is created blocking; flip it non-blocking before
+        // it's ever registered with the reactor or accepted from.
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_fd())?;
         Ok(TcpListener { inner, io, reactor })
@@ -39,15 +54,16 @@ impl TcpListener {
             self.inner.accept().map_err(from_platform_err)
         })
         .await?;
-        // accept4 hands back a blocking fd regardless of the listener's
-        // own non-blocking state; flip it before it's touched.
+        // A freshly accepted fd is born blocking regardless of the
+        // listener's own non-blocking state; flip it before it's ever
+        // touched.
         stream.set_nonblocking(true).map_err(from_platform_err)?;
-        let stream = TcpStream::from_linux(stream, self.reactor.clone())?;
+        let stream = TcpStream::from_accepted(stream, self.reactor.clone())?;
         Ok((stream, peer))
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        platform::net::TcpListener::local_addr(&self.inner).map_err(from_platform_err)
+        self.inner.local_addr().map_err(from_platform_err)
     }
 }
 
@@ -57,10 +73,7 @@ impl Drop for TcpListener {
     }
 }
 
-/// A non-blocking, epoll-driven TCP stream, backed by rustils'
-/// `LinuxTcpStream` for addressing/`set_nodelay`. `connect` and the
-/// actual `read`/`write` syscalls are hand-rolled -- see `socket.rs`'s
-/// module docs for why.
+/// A non-blocking, epoll-driven TCP stream.
 ///
 /// Exposes both a plain `&self` `async fn read`/`write` pair (so one
 /// task can read while another writes the same stream, e.g. via two
@@ -68,7 +81,7 @@ impl Drop for TcpListener {
 /// pair for generic code -- see `async_io.rs`'s module docs for why both
 /// exist and how they share one implementation.
 pub struct TcpStream {
-    inner: LinuxTcpStream,
+    inner: PlatformTcpStream,
     io: Arc<ScheduledIo>,
     reactor: Arc<Reactor>,
 }
@@ -81,7 +94,7 @@ impl TcpStream {
         let fd = socket::new_tcp_socket(addr)?;
         socket::connect(fd.as_raw_fd(), addr)?;
         let io = reactor.register(fd.as_raw_fd())?;
-        let inner = LinuxTcpStream::from(fd);
+        let inner = PlatformTcpStream::from(fd);
         // A non-blocking connect completes asynchronously; the socket
         // becoming writable is the signal to check whether it actually
         // succeeded.
@@ -92,7 +105,7 @@ impl TcpStream {
         Ok(TcpStream { inner, io, reactor })
     }
 
-    fn from_linux(inner: LinuxTcpStream, reactor: Arc<Reactor>) -> io::Result<TcpStream> {
+    fn from_accepted(inner: PlatformTcpStream, reactor: Arc<Reactor>) -> io::Result<TcpStream> {
         let io = reactor.register(inner.as_raw_fd())?;
         Ok(TcpStream { inner, io, reactor })
     }
@@ -139,15 +152,15 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        platform::net::TcpStream::set_nodelay(&self.inner, nodelay).map_err(from_platform_err)
+        self.inner.set_nodelay(nodelay).map_err(from_platform_err)
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        platform::net::TcpStream::peer_addr(&self.inner).map_err(from_platform_err)
+        self.inner.peer_addr().map_err(from_platform_err)
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        platform::net::TcpStream::local_addr(&self.inner).map_err(from_platform_err)
+        self.inner.local_addr().map_err(from_platform_err)
     }
 
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {

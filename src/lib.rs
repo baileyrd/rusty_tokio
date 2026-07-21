@@ -14,9 +14,10 @@
 //! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
 //!   with its own run queue, backed by a shared injector queue and
 //!   able to steal from one another.
-//! - [`io`]: an `epoll`-backed reactor plus non-blocking `TcpStream` /
-//!   `TcpListener` / `UdpSocket`, and an `AsyncRead`/`AsyncWrite` trait
-//!   pair for generic code (`copy`, codecs, adapters).
+//! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS/BSD) plus
+//!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket`, and an
+//!   `AsyncRead`/`AsyncWrite` trait pair for generic code (`copy`,
+//!   codecs, adapters).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`.
 //! - [`sync`]: `Notify`, an async `Mutex`, `oneshot`, and bounded `mpsc`
@@ -28,10 +29,17 @@
 //! This is a real, working runtime, not a toy -- but it's also honest
 //! about its edges rather than papering over them:
 //!
-//! - **Linux only.** The reactor is built directly on `epoll`,
-//!   `eventfd`, and `accept4`. Porting to macOS/BSD (`kqueue`) or
-//!   Windows (IOCP) would mean a second reactor backend behind the same
-//!   `ScheduledIo` interface -- doable, not done.
+//! - **Linux and macOS/BSD, not Windows.** The reactor has two backends
+//!   behind the same `ScheduledIo` interface -- `epoll`+`eventfd` on
+//!   Linux, `kevent`+`EVFILT_USER` on macOS/BSD -- with a matching
+//!   hand-rolled socket layer on macOS/BSD (`rustils` has no backend
+//!   there to build on the way Linux does). A Windows (IOCP) backend
+//!   would need a third, doable but not done. **The macOS/BSD path is
+//!   compile-checked (`cargo check --target x86_64-apple-darwin`,
+//!   with real macOS `libc` bindings) but has never been run on real
+//!   hardware** -- this crate has only ever been developed and tested
+//!   on Linux. Treat it as reviewed-but-unverified until someone runs
+//!   the test suite on an actual Mac.
 //! - **`AsyncRead`/`AsyncWrite` are this crate's own trait definitions,
 //!   not tokio's or `futures-io`'s.** Shaped the same way (`Pin<&mut
 //!   Self>`, `poll_*` methods) so generic code here works the same way,
