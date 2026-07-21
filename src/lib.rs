@@ -34,10 +34,6 @@
 //! - **No `AsyncRead`/`AsyncWrite` trait ecosystem interop.** `TcpStream`
 //!   exposes plain inherent `async fn read`/`write` rather than the
 //!   trait pair the wider ecosystem (and codecs/framing crates) expect.
-//! - **No `spawn_blocking` / blocking thread pool.** A task that calls a
-//!   genuinely blocking syscall stalls the worker thread it's running
-//!   on; there's no escape hatch to offload that onto a separate pool
-//!   yet.
 //! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
 //!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
 //!   actually uses) would scale better under heavy contention.
@@ -67,4 +63,25 @@ where
     F::Output: Send + 'static,
 {
     Handle::current().spawn(future)
+}
+
+/// Run a genuinely blocking closure (a blocking syscall, heavy CPU work,
+/// a synchronous library call with no async equivalent) on a dedicated
+/// blocking-task thread pool instead of stalling one of the runtime's
+/// async worker threads.
+///
+/// The returned [`JoinHandle`] behaves like any other: `.await` it for
+/// the closure's return value, `Err(JoinError)` if it panicked. Calling
+/// [`JoinHandle::abort`] on it detaches from the result but does **not**
+/// stop the closure -- there is no way to preempt a thread stuck in a
+/// blocking syscall, only to stop waiting for it.
+///
+/// # Panics
+/// Panics if called from a thread with no ambient runtime.
+pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    Handle::current().spawn_blocking(f)
 }
