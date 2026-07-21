@@ -165,6 +165,17 @@ rustils' API can't support them yet.
   the earlier one always wins (no starvation protection for that case).
   No `else` branch, no `,if <condition>` guards, no biased mode. See the
   macro's own doc comment for the full scope statement.
+- **`join!`/`try_join!`**: run two to five futures concurrently *within
+  the calling task* (no extra `spawn`, no extra scheduler `Task`) and
+  resolve once every one of them has, returning a tuple of their
+  outputs -- `rusty_tokio::join!(fut1, fut2, fut3)`. Shares `select!`'s
+  "poll every branch each wake" shape and its 2-5-branch scope limit, but
+  waits for all branches instead of stopping at the first; a branch that
+  finishes early isn't re-polled while its slower siblings catch up.
+  `try_join!` is the `Result`-aware sibling: every branch must resolve to
+  a `Result` with the *same* error type, and it short-circuits (drops the
+  remaining branches without polling them again) on the first `Err`
+  rather than waiting for the rest to finish pointlessly.
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker
