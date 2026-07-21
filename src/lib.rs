@@ -15,9 +15,9 @@
 //!   with its own run queue, backed by a shared injector queue and
 //!   able to steal from one another.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
-//!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket`, and an
-//!   `AsyncRead`/`AsyncWrite` trait pair for generic code (`copy`,
-//!   codecs, adapters).
+//!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
+//!   `UnixStream` / `UnixListener`, and an `AsyncRead`/`AsyncWrite` trait
+//!   pair for generic code (`copy`, codecs, adapters).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`.
 //! - [`sync`]: `Notify`, an async `Mutex`, `oneshot`, and bounded `mpsc`

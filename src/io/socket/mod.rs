@@ -26,6 +26,15 @@
 //!   Bypassing the trait for the two syscalls that are trivial anyway
 //!   (a raw `read`/`write` on an fd we already have via `AsRawFd`) keeps
 //!   that API intact instead of hiding a mutex behind it.
+//!
+//! The same non-blocking-`connect` gap applies to `AF_UNIX` streams too
+//! (`unix.rs`), so `new_unix_socket`/`unix_connect`/`sun_path_offset`/
+//! `to_sockaddr_un` below mirror `new_tcp_socket`/`connect`/`to_sockaddr`
+//! exactly, just packing a `sockaddr_un` from a `Path` instead of a
+//! `sockaddr_{in,in6}` from a `SocketAddr` -- rustils' own
+//! `{Linux,Macos}UnixStream::connect` is blocking for the same reason its
+//! TCP counterpart is, and for the same reason has no "bare socket, don't
+//! connect yet" constructor to build an async version on top of.
 
 use libc::{c_int, sockaddr, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t};
 use platform::error::{OsCode, PlatformError};
@@ -33,6 +42,8 @@ use std::io;
 use std::mem;
 use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 fn cvt(ret: c_int) -> io::Result<c_int> {
     if ret < 0 {
@@ -170,6 +181,125 @@ pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
         }
         Ok(owned)
     }
+}
+
+/// A bare, non-blocking `AF_UNIX` stream socket -- the `AF_UNIX`
+/// counterpart of [`new_tcp_socket`], same reasoning: nothing in
+/// rustils' public surface creates one without also connecting
+/// (blocking) or binding it.
+pub(crate) fn new_unix_socket() -> io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain integer arguments, no memory referenced.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        cvt(fd)?;
+        // SAFETY: `fd` was just returned by `socket(2)` and is valid,
+        // otherwise-unowned, and wrapped exactly once.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // See `new_tcp_socket`'s macOS arm for why this is two steps
+        // instead of one atomic `socket(2)` call.
+        //
+        // SAFETY: plain integer arguments, no memory referenced.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        cvt(fd)?;
+        // SAFETY: `fd` was just returned by `socket(2)` and is valid,
+        // otherwise-unowned, and wrapped exactly once.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
+        use std::os::fd::AsRawFd;
+        // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
+        // sole variadic argument `F_SETFD` expects.
+        if unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(owned)
+    }
+}
+
+/// The byte offset of `sockaddr_un::sun_path` within `sockaddr_un` --
+/// `sun_path` is a trailing array whose start isn't at a portable
+/// constant offset (Linux's `sockaddr_un` has no leading `sun_len` byte,
+/// BSD's does), so it's measured once here rather than hard-coded.
+fn sun_path_offset() -> usize {
+    // SAFETY: an all-zero `sockaddr_un` is a valid (if meaningless)
+    // value; nothing here is read before being written, only its
+    // fields' addresses are taken.
+    let addr: libc::sockaddr_un = unsafe { mem::zeroed() };
+    let base = std::ptr::addr_of!(addr) as usize;
+    let path = std::ptr::addr_of!(addr.sun_path) as usize;
+    path - base
+}
+
+/// Pack a filesystem `path` into a kernel-layout `sockaddr_un` and the
+/// length of the filled-in prefix -- the `AF_UNIX` counterpart of
+/// `to_sockaddr`. Includes the trailing NUL in `len`, matching what a C
+/// program passes to `bind`/`connect` for a pathname socket.
+fn to_sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, socklen_t)> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AF_UNIX path must not contain a NUL byte",
+        ));
+    }
+    // SAFETY: see `sun_path_offset`.
+    let mut addr: libc::sockaddr_un = unsafe { mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AF_UNIX path too long (must fit in sockaddr_un::sun_path)",
+        ));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes.iter()) {
+        *slot = *byte as libc::c_char;
+    }
+    let len = sun_path_offset() + bytes.len() + 1;
+    // BSD's `sockaddr_un` (unlike Linux's) carries a leading `sun_len`
+    // byte -- see `to_sockaddr`'s `sockaddr_in`/`sockaddr_in6` arms above
+    // for the same distinction on the TCP side, and rustils'
+    // `platform-macos::sys::net::to_sockaddr_un` for confirmation this
+    // field is filled in (to the same filled-prefix length `len` computed
+    // below) rather than left zero.
+    #[cfg(target_os = "macos")]
+    {
+        addr.sun_len = len as u8;
+    }
+    Ok((addr, len as socklen_t))
+}
+
+/// `connect(2)` to an `AF_UNIX` path on a non-blocking socket -- the
+/// `AF_UNIX` counterpart of [`connect`]; see that function's docs for why
+/// `EINPROGRESS` is treated as success here too.
+pub(crate) fn unix_connect(fd: RawFd, path: &Path) -> io::Result<()> {
+    let (addr, len) = to_sockaddr_un(path)?;
+    // SAFETY: `addr` holds a valid `sockaddr_un` for exactly `len` bytes
+    // (`to_sockaddr_un`'s contract); `fd` is a valid, freshly created,
+    // still-unconnected socket.
+    let r = unsafe {
+        libc::connect(
+            fd,
+            (&addr as *const libc::sockaddr_un).cast::<sockaddr>(),
+            len,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EINPROGRESS) {
+        return Ok(());
+    }
+    Err(err)
 }
 
 /// `connect(2)` on a non-blocking socket returns `EINPROGRESS`
