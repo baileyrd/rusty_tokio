@@ -25,6 +25,22 @@ rustils' API can't support them yet.
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when
   one goes idle.
+- **Graceful shutdown**: plain `drop(runtime)` still tears down
+  immediately (abandoning anything mid-poll, unchanged from before), but
+  `Runtime::shutdown_background()`/`shutdown_timeout(duration)` and
+  `Handle::shutdown_notified()`/`is_shutting_down()` give spawned tasks a
+  real chance to notice shutdown and clean up first: `shutdown_notified()`
+  resolves once shutdown begins (immediately, if it already has), and a
+  task awaiting it directly -- e.g. a dedicated cleanup task that does
+  nothing until then -- is guaranteed to actually get scheduled and run
+  before teardown proceeds, not just notified a moment before being cut
+  off. `shutdown_timeout` additionally waits (bounded) for every
+  outstanding task and the blocking pool to finish naturally before
+  falling back to the same abrupt teardown `drop`/`shutdown_background`
+  give; `shutdown_background` never waits at all. This crate has no
+  `select!` macro, so racing `shutdown_notified()` against a task's own
+  ongoing work (rather than awaiting it as the task's entire body) has no
+  built-in way to do so yet.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
   `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
   backends behind the same interface

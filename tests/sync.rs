@@ -115,3 +115,55 @@ fn notify_permit_is_banked_for_an_early_notify() {
             .expect("banked permit should let this resolve immediately");
     });
 }
+
+#[test]
+fn notify_waiters_wakes_and_resolves_every_current_waiter() {
+    // Regression test: a naive `notify_waiters` that wakes a waiter's
+    // stored `Waker` without also leaving it something to see on the
+    // next poll (unlike `notify_one`'s banked permit) lets that woken
+    // future register nothing new (it's already `registered`) and
+    // return `Pending` forever -- the wakeup fires but is then silently
+    // lost. Exercises two concurrent waiters so a bug that only wakes
+    // one of them (or wakes both but neither ever actually resolves)
+    // shows up as a hang caught by the timeout below.
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let notify = Arc::new(Notify::new());
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let notify = notify.clone();
+                rusty_tokio::spawn(async move { notify.notified().await })
+            })
+            .collect();
+
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        notify.notify_waiters();
+
+        for w in waiters {
+            rusty_tokio::time::timeout(Duration::from_millis(200), w)
+                .await
+                .expect("notify_waiters should wake and resolve every current waiter")
+                .unwrap();
+        }
+    });
+}
+
+#[test]
+fn notify_waiters_does_not_bank_anything_for_a_later_waiter() {
+    // The other half of `notify_waiters`'s documented contract: it only
+    // wakes tasks waiting *at the time it's called* -- a `notified()`
+    // registered afterward should still have to wait for its own
+    // notification, not spuriously resolve from a broadcast that
+    // already happened.
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Notify::new();
+        notify.notify_waiters(); // nobody waiting yet -- should be a no-op
+        let result =
+            rusty_tokio::time::timeout(Duration::from_millis(50), notify.notified()).await;
+        assert!(
+            result.is_err(),
+            "a notified() registered after notify_waiters() already fired should not resolve on its own"
+        );
+    });
+}

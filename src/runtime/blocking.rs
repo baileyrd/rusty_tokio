@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Job = Box<dyn FnOnce() + Send>;
 
@@ -106,24 +106,44 @@ impl BlockingPool {
         }
     }
 
-    pub(crate) fn shutdown(&self) {
+    /// Tells every blocking-pool thread to stop once its queue empties,
+    /// without waiting for any of them to actually do so -- see
+    /// [`BlockingPool::wait_for_drain`] for the part that waits.
+    pub(crate) fn signal_shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::Release);
         self.inner.condvar.notify_all();
-        // Threads are transient and self-terminating (unlike the fixed
-        // reactor/timer threads), so there's nothing to `join` here --
-        // just wait for the count to actually reach zero so a caller
-        // relying on `Runtime` drop as a clean-shutdown point (tests, in
-        // particular) doesn't race a still-finishing blocking job. The
-        // bounded wait is a safety net in case a decrement-then-notify
-        // on another thread races this wait's setup.
+    }
+
+    /// Waits for every blocking-pool thread to exit, or until `deadline`
+    /// passes -- whichever comes first (waits unboundedly if `deadline`
+    /// is `None`). Threads are transient and self-terminating (unlike
+    /// the fixed reactor/timer threads), so there's nothing to `join`
+    /// here, only this count to watch. The bounded poll interval is a
+    /// safety net in case a decrement-then-notify on another thread
+    /// races this wait's setup.
+    pub(crate) fn wait_for_drain(&self, deadline: Option<Instant>) {
         let mut guard = self.inner.queue.lock().unwrap();
         while self.inner.live_threads.load(Ordering::Acquire) > 0 {
-            guard = self
-                .inner
-                .condvar
-                .wait_timeout(guard, Duration::from_millis(50))
-                .unwrap()
-                .0;
+            let wait = match deadline {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return;
+                    }
+                    (deadline - now).min(Duration::from_millis(50))
+                }
+                None => Duration::from_millis(50),
+            };
+            guard = self.inner.condvar.wait_timeout(guard, wait).unwrap().0;
         }
+    }
+
+    /// Signals shutdown and waits (unboundedly) for every thread to
+    /// drain -- used by [`super::Runtime`]'s `Drop`, where relying on it
+    /// as a clean-shutdown point (tests, in particular) matters more
+    /// than bounding the wait.
+    pub(crate) fn shutdown(&self) {
+        self.signal_shutdown();
+        self.wait_for_drain(None);
     }
 }

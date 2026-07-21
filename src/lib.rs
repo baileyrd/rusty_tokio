@@ -13,7 +13,12 @@
 //!   design has a real lost-wakeup bug under multi-threaded execution.
 //! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
 //!   with its own run queue, backed by a shared injector queue and
-//!   able to steal from one another.
+//!   able to steal from one another. `Runtime::shutdown_background`/
+//!   `shutdown_timeout` and `Handle::shutdown_notified`/
+//!   `is_shutting_down` give spawned tasks a real chance to observe
+//!   shutdown and clean up (flush a buffer, close a file) before
+//!   teardown, rather than just being abandoned mid-poll the way plain
+//!   `drop(runtime)` still does.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
 //!   `UnixStream` / `UnixListener`, and an `AsyncRead`/`AsyncWrite` trait
