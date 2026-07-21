@@ -1,4 +1,4 @@
-use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock, Semaphore};
+use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock, Semaphore};
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -532,5 +532,171 @@ fn notify_waiters_does_not_bank_anything_for_a_later_waiter() {
             result.is_err(),
             "a notified() registered after notify_waiters() already fired should not resolve on its own"
         );
+    });
+}
+
+#[test]
+fn once_cell_get_or_init_runs_the_initializer_exactly_once() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(OnceCell::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let cell = cell.clone();
+            let calls = calls.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                *cell
+                    .get_or_init(|| async {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+                        42
+                    })
+                    .await
+            }));
+        }
+
+        for h in handles {
+            assert_eq!(h.await.unwrap(), 42);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn once_cell_get_returns_none_before_init_and_some_after() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let cell = OnceCell::new();
+        assert_eq!(cell.get(), None);
+        assert!(!cell.initialized());
+
+        let value = cell.get_or_init(|| async { "hello" }).await;
+        assert_eq!(*value, "hello");
+        assert_eq!(cell.get(), Some(&"hello"));
+        assert!(cell.initialized());
+    });
+}
+
+#[test]
+fn once_cell_set_succeeds_once_then_fails() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let cell = OnceCell::new();
+        assert!(cell.set(1).is_ok());
+        match cell.set(2) {
+            Err(rusty_tokio::sync::SetError::AlreadyInitialized(v)) => assert_eq!(v, 2),
+            _ => panic!("expected AlreadyInitialized"),
+        }
+        assert_eq!(cell.get(), Some(&1));
+    });
+}
+
+#[test]
+fn once_cell_new_with_is_already_initialized() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let cell = OnceCell::new_with(7);
+        assert!(cell.initialized());
+        assert_eq!(*cell.get_or_init(|| async { unreachable!() }).await, 7);
+    });
+}
+
+#[test]
+fn once_cell_into_inner_returns_the_value_when_initialized() {
+    let cell: OnceCell<String> = OnceCell::new();
+    assert_eq!(cell.into_inner(), None);
+
+    let cell = OnceCell::new_with(String::from("owned"));
+    assert_eq!(cell.into_inner(), Some(String::from("owned")));
+}
+
+#[test]
+fn once_cell_recovers_after_the_initializer_panics() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(OnceCell::new());
+
+        // First caller's initializer panics -- the panic must not wedge
+        // the cell in "initializing" forever.
+        let cell1 = cell.clone();
+        let first = rusty_tokio::spawn(async move {
+            cell1.get_or_init(|| async { panic!("boom") }).await;
+        });
+        assert!(first.await.unwrap_err().is_panic());
+
+        assert!(!cell.initialized());
+        let value = cell.get_or_init(|| async { 99 }).await;
+        assert_eq!(*value, 99);
+    });
+}
+
+#[test]
+fn once_cell_recovers_after_the_initializer_is_cancelled() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(OnceCell::new());
+
+        let cell1 = cell.clone();
+        let handle = rusty_tokio::spawn(async move {
+            cell1
+                .get_or_init(|| async {
+                    rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+                    1
+                })
+                .await;
+        });
+        // Give the task a chance to actually start (register the sleep,
+        // moving the cell to `Initializing`) before aborting it.
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        assert!(!cell.initialized());
+        let value = cell.get_or_init(|| async { 2 }).await;
+        assert_eq!(*value, 2);
+    });
+}
+
+#[test]
+fn once_cell_concurrent_waiters_see_the_first_successful_result_after_a_panic() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(OnceCell::new());
+        let attempt = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cell = cell.clone();
+            let attempt = attempt.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                cell.get_or_init(|| async {
+                    // Only the very first attempt across all callers
+                    // panics; whichever caller (or callers, since a
+                    // panic wakes every parked waiter to re-race) picks
+                    // it up next succeeds.
+                    if attempt.fetch_add(1, Ordering::SeqCst) == 0 {
+                        rusty_tokio::time::sleep(Duration::from_millis(5)).await;
+                        panic!("first attempt always fails");
+                    }
+                    123
+                })
+                .await;
+            }));
+        }
+
+        let mut panicked = 0;
+        let mut succeeded = 0;
+        for h in handles {
+            match h.await {
+                Ok(()) => succeeded += 1,
+                Err(e) if e.is_panic() => panicked += 1,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(panicked, 1);
+        assert_eq!(succeeded, 9);
+        assert_eq!(cell.get(), Some(&123));
     });
 }

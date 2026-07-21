@@ -204,7 +204,17 @@ rustils' API can't support them yet.
   intermediate value). Useful for "the current configuration" or "has
   shutdown been requested"-shaped state -- the same shape
   `Handle::shutdown_notified`/`is_shutting_down` hand-rolled as a
-  one-off special case before this existed.
+  one-off special case before this existed. Also `OnceCell`: initialize
+  a value exactly once no matter how many tasks concurrently ask for
+  it -- `get_or_init(|| async { .. }).await` runs the initializer at
+  most once, and a caller that arrives *while* another's initializer is
+  already in flight (not just one that arrives before it starts) parks
+  instead of racing to initialize independently, then gets back the
+  same result. If the winning initializer panics or is dropped
+  mid-`.await` (its task gets aborted), the cell resets to uninitialized
+  rather than getting stuck reporting "initializing" forever -- every
+  other parked caller wakes back up and one of them becomes the new
+  initializer.
 - **`select!`**: race two to five futures, running whichever resolves
   first and dropping (cancelling) the rest -- `rusty_tokio::select! { pat
   = future => body, ... }`. Deliberately scoped rather than a full
