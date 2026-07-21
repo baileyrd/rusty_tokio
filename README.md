@@ -22,7 +22,13 @@ rustils' API can't support them yet.
   finds the future temporarily missing from its slot and silently drops
   the wakeup. `task`'s module docs walk through the fix. Also
   `task::yield_now()`, for a task that wants to cooperate with others
-  without splitting itself across multiple spawns.
+  without splitting itself across multiple spawns, and `task::JoinSet`:
+  a dynamic collection of spawned tasks -- `join_next().await` resolves
+  as soon as *any* member finishes (not spawn order, unlike joining a
+  plain `Vec<JoinHandle<T>>` one at a time), `abort_all`/`shutdown` to
+  cancel everything at once, and -- unlike a bare `JoinHandle`, which
+  never aborts on drop -- dropping the whole set aborts every task still
+  in it.
 - **Runtime** (`Runtime`, `Handle`): a fixed pool of worker threads, each
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when

@@ -19,10 +19,12 @@
 //! and the poller reschedules itself if that note is present.
 
 mod join;
+mod join_set;
 mod state;
 mod yield_now;
 
 pub use join::{JoinError, JoinHandle};
+pub use join_set::JoinSet;
 pub use yield_now::{yield_now, YieldNow};
 
 use crate::runtime::Shared;
