@@ -38,7 +38,10 @@
 //!   `UnixStream` / `UnixListener`, and an `AsyncRead`/`AsyncWrite` trait
 //!   pair for generic code (`copy`, codecs, adapters).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
-//!   `timeout`, and `interval`.
+//!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
+//!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
+//!   a manually-driven virtual clock for deterministic timer tests that
+//!   don't want to wait on real wall time.
 //! - [`sync`]: `Notify`, an async `Mutex`/`RwLock`, `Semaphore`,
 //!   `oneshot`, `watch`, and bounded/unbounded `mpsc` -- the primitives
 //!   above are usually enough to build everything else on top of.

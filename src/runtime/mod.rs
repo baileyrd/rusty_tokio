@@ -74,6 +74,13 @@ pub(crate) struct Shared {
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
     pub(crate) blocking_pool: BlockingPool,
+    /// Whether this runtime was built via
+    /// [`Builder::new_current_thread`] -- checked by `time::pause`,
+    /// which (matching tokio) only makes sense on that flavor: pausing
+    /// wall-clock time shared by every task on the runtime would be
+    /// incoherent if other worker threads could be concurrently relying
+    /// on real timing.
+    is_current_thread: bool,
 }
 
 impl Shared {
@@ -193,6 +200,10 @@ impl Shared {
             std::pin::Pin::new(fut).poll(cx)
         })
     }
+
+    pub(crate) fn is_current_thread(&self) -> bool {
+        self.is_current_thread
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -306,6 +317,7 @@ impl Builder {
             reactor,
             timer,
             blocking_pool,
+            is_current_thread,
         });
 
         let workers = if is_current_thread {
