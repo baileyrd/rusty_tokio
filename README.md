@@ -134,7 +134,15 @@ rustils' API can't support them yet.
   (FIFO) like tokio's own -- both borrowed (`SemaphorePermit`) and
   `Arc`-owned (`OwnedSemaphorePermit`, for holding a permit across a
   spawned task boundary) permit flavors, plus `acquire_many` for
-  reserving more than one permit at once.
+  reserving more than one permit at once. Also `watch`: a single-
+  latest-value broadcast (`watch::channel`/`Sender`/`Receiver`) --
+  `changed().await` resolves once the value's been updated since this
+  receiver last saw it, no queue and no lagging (a receiver that misses
+  several updates in a row just sees the latest one, not every
+  intermediate value). Useful for "the current configuration" or "has
+  shutdown been requested"-shaped state -- the same shape
+  `Handle::shutdown_notified`/`is_shutting_down` hand-rolled as a
+  one-off special case before this existed.
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker
