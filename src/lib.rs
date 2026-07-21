@@ -35,6 +35,10 @@
 //! - [`select!`]: race two to five futures, running whichever resolves
 //!   first and dropping the rest -- see that macro's own docs for
 //!   exactly what's (and isn't) supported.
+//! - [`join!`]/[`try_join!`]: run two to five futures concurrently
+//!   within the calling task (no extra `spawn`) and resolve once every
+//!   one of them has, returning a tuple of their outputs; `try_join!` is
+//!   the `Result`-aware sibling, short-circuiting on the first `Err`.
 //!
 //! # Deliberately out of scope (for now)
 //!
