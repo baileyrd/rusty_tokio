@@ -94,6 +94,12 @@
 //!   `io::stdio`'s own module docs for the two-part fix (an internal
 //!   `write_all`, never a partial write, plus the lock held for each
 //!   call's entire duration) and why the fix needs both halves together.
+//!   And [`io::duplex`]: an in-memory, connected pair of streams -- no
+//!   socket, fd, or reactor involved at all, just two mutex-guarded byte
+//!   buffers with backpressure (a write blocks once the peer's read side
+//!   is full) -- for testing anything generic over `AsyncRead`/
+//!   `AsyncWrite` without standing up a real loopback `TcpListener`/
+//!   `TcpStream` pair.
 //! - [`fs`]: [`fs::File`], the only type here so far. A regular file
 //!   can't be registered with a reactor's readiness model the way a
 //!   socket can -- the kernel considers it always "ready", and the real
