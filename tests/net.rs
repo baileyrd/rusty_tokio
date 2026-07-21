@@ -1,4 +1,4 @@
-use rusty_tokio::io::{TcpListener, TcpStream, UdpSocket};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream, UdpSocket};
 use rusty_tokio::Runtime;
 use std::net::SocketAddr;
 
@@ -57,6 +57,63 @@ fn many_concurrent_tcp_connections() {
         for c in clients {
             c.await.unwrap();
         }
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn into_split_moves_owned_halves_into_separate_tasks() {
+    // The whole point of `into_split` over plain `&TcpStream` usage: the
+    // two halves are independently `'static` and can be handed to two
+    // different spawned tasks with no `Arc` wrapping at the call site.
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (mut read_half, mut write_half) = client.into_split();
+
+        let writer_task = rusty_tokio::spawn(async move { write_half.write_all(b"hello").await });
+
+        let mut buf = [0u8; 5];
+        read_half.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        writer_task.await.unwrap().unwrap();
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn split_borrows_read_and_write_halves_from_one_task() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut read_half, mut write_half) = client.split();
+
+        write_half.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        read_half.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
         server.await.unwrap();
     });
 }

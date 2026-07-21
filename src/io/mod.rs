@@ -20,5 +20,5 @@ mod tcp;
 mod udp;
 
 pub use async_io::{copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-pub use tcp::{TcpListener, TcpStream};
+pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
 pub use udp::UdpSocket;
