@@ -7,7 +7,14 @@ license = "MIT"
 
 [dependencies]
 libc = "0.2"
+# `platform` is pure portable trait/type definitions (no I/O, no OS
+# dependency), so it's used on every target. `platform-linux` -- the
+# concrete Linux socket backend -- only makes sense, and only builds,
+# on Linux; macOS/BSD hand-roll their own socket layer directly against
+# libc instead (rustils has no macOS backend to build on yet).
 platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3" }
 
 [profile.release]

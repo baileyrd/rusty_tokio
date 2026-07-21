@@ -24,16 +24,28 @@ hand-rolled because rustils' API can't support them yet.
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when
   one goes idle.
-- **I/O** (`io`): an `epoll`-backed reactor thread plus non-blocking
-  `TcpStream`, `TcpListener`, and `UdpSocket`. Level-triggered by choice
-  -- edge-triggered epoll requires every reader to drain a fd to
-  `EWOULDBLOCK` or risk missing events forever, an easy invariant to get
-  subtly wrong for one extra syscall's worth of savings. Socket setup
-  goes through `rustils`; see "Built on rustils" below. Also includes an
-  `AsyncRead`/`AsyncWrite` trait pair (shaped like tokio's/`futures-io`'s
-  -- `Pin<&mut Self>`, `poll_*` methods -- but this crate's own
-  definitions, not a re-export) plus a generic `copy`, so code doesn't
-  need to be written against the concrete `TcpStream` type.
+- **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
+  `TcpListener`, and `UdpSocket`. Two backends behind the same interface
+  -- `epoll` on Linux, `kevent` on macOS/BSD -- both level-triggered by
+  choice, since edge-triggered epoll/kqueue demands every reader drain a
+  fd to `EWOULDBLOCK` or risk missing events forever, an easy invariant
+  to get subtly wrong for one extra syscall's worth of savings. Socket
+  setup goes through `rustils` on Linux; macOS/BSD hand-roll their own
+  (rustils has no backend there yet) -- see "Built on rustils" below.
+  Also includes an `AsyncRead`/`AsyncWrite` trait pair (shaped like
+  tokio's/`futures-io`'s -- `Pin<&mut Self>`, `poll_*` methods -- but
+  this crate's own definitions, not a re-export) plus a generic `copy`,
+  so code doesn't need to be written against the concrete `TcpStream`
+  type.
+
+  **macOS/BSD support has never run on real hardware.** This crate is
+  developed and tested on Linux only; the macOS/BSD reactor and socket
+  code is verified with `cargo check --target x86_64-apple-darwin`
+  (real macOS `libc` bindings, real type-checking -- and it did catch
+  real bugs: BSD's extra `sockaddr` length byte, raw-pointer type
+  inference, a couple of missing error conversions) but nothing beyond
+  that. Treat it as reviewed-but-unverified until someone actually runs
+  `cargo test` on a Mac.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, and `interval`,
   backed by a single background thread holding a min-heap of deadlines.
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
@@ -114,14 +126,23 @@ mismatch rather than taste:
   trait for these two (a raw `read`/`write` on an fd already in hand via
   `AsRawFd`) keeps that API instead of hiding a mutex behind it.
 
+`rustils` has no macOS backend at all, though, so none of the above
+applies there: `io/socket/macos.rs` hand-rolls bind/listen/accept/UDP
+directly against `libc` (mirroring rustils' concrete-type shape closely
+enough -- same method names, same `platform::error::Result` -- that
+`tcp.rs`/`udp.rs` need only a `#[cfg]`-gated type alias, not their own
+branching). See the macOS/BSD caveat above -- this half is
+compile-checked only, never run.
+
 ## What's deliberately not here (yet)
 
 This is a real, working runtime, not a toy -- but it's honest about its
 edges instead of papering over them:
 
-- **Linux only.** The reactor is built directly on `epoll`, `eventfd`,
-  and `accept4`. A `kqueue` (macOS/BSD) or IOCP (Windows) backend behind
-  the same `ScheduledIo` interface is doable, just not done.
+- **No Windows.** Linux (`epoll`) and macOS/BSD (`kevent`, see the
+  caveat above) both have a reactor backend; an IOCP backend behind the
+  same `ScheduledIo` interface would need a hand-rolled Windows socket
+  layer too (no rustils backend there either), doable but not done.
 - **`AsyncRead`/`AsyncWrite` are this crate's own traits, not tokio's or
   `futures-io`'s.** Same shape, so generic code within this project works
   the same way, but a third-party codec/framing crate built against
@@ -139,6 +160,11 @@ cargo test      # unit tests for the task state machine, plus integration
                 # tests covering multi-threaded scheduling, abort, panics,
                 # TCP/UDP over the real reactor, and every sync primitive
 cargo clippy --all-targets
+
+# macOS/BSD reactor and socket code: compiles and type-checks, but
+# nothing beyond that -- see the macOS/BSD caveat above.
+rustup target add x86_64-apple-darwin
+cargo check --target x86_64-apple-darwin --all-targets
 ```
 
 The integration tests deliberately exercise real concurrency (many
