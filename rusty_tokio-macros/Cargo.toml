@@ -1,0 +1,14 @@
+[package]
+name = "rusty_tokio-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports."
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
