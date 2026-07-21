@@ -290,6 +290,42 @@ pub trait AsyncWriteExt: AsyncWrite {
 
 impl<T: AsyncWrite + ?Sized> AsyncWriteExt for T {}
 
+/// Seeking within a stream -- meaningful for a file (see
+/// [`crate::fs::File`]), not for a socket (`TcpStream`/`UdpSocket`/
+/// `UnixStream` don't implement this).
+///
+/// A single `poll_seek(pos)` rather than tokio's own two-phase
+/// `start_seek(pos)`/`poll_complete()` split: that split exists so a
+/// caller can kick a seek off and poll *something else* while it's
+/// pending, useful for tokio's own file implementation where a seek and
+/// a read might be interleaved through separate internal buffering
+/// state. This crate's [`crate::fs::File`] already funnels every
+/// operation -- read, write, or seek -- through the same single
+/// in-flight-blocking-call state machine, so there's nothing else
+/// meaningful to poll in between; a single combined method is simpler
+/// and just as capable for that shape.
+pub trait AsyncSeek {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: io::SeekFrom,
+    ) -> Poll<io::Result<u64>>;
+}
+
+/// Provided convenience over [`AsyncSeek::poll_seek`]. Blanket-implemented
+/// for every `AsyncSeek`. See [`AsyncReadExt`]'s docs for why this is
+/// `-> impl Future + Send` instead of `async fn`.
+pub trait AsyncSeekExt: AsyncSeek {
+    fn seek(&mut self, pos: io::SeekFrom) -> impl Future<Output = io::Result<u64>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move { std::future::poll_fn(|cx| Pin::new(&mut *self).poll_seek(cx, pos)).await }
+    }
+}
+
+impl<T: AsyncSeek + ?Sized> AsyncSeekExt for T {}
+
 /// A reader with an internal buffer, letting callers ask for "whatever's
 /// available right now" (`poll_fill_buf`) and consume it incrementally
 /// (`consume`) instead of only ever reading into a caller-provided
