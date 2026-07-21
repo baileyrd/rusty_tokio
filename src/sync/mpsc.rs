@@ -128,6 +128,9 @@ impl<T> Drop for Sender<T> {
 impl<T> Receiver<T> {
     pub async fn recv(&mut self) -> Option<T> {
         std::future::poll_fn(|cx| {
+            if crate::coop::poll_proceed(cx).is_pending() {
+                return Poll::Pending;
+            }
             let mut guard = self.shared.inner.lock().unwrap();
             if let Some(v) = guard.queue.pop_front() {
                 let waker = guard.send_waiters.pop_front();
@@ -243,6 +246,9 @@ impl<T> Drop for UnboundedSender<T> {
 impl<T> UnboundedReceiver<T> {
     pub async fn recv(&mut self) -> Option<T> {
         std::future::poll_fn(|cx| {
+            if crate::coop::poll_proceed(cx).is_pending() {
+                return Poll::Pending;
+            }
             let mut guard = self.shared.inner.lock().unwrap();
             if let Some(v) = guard.queue.pop_front() {
                 return Poll::Ready(Some(v));
