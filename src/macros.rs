@@ -606,3 +606,42 @@ macro_rules! try_join {
         .await
     }};
 }
+
+/// Declares one or more task-local values -- see
+/// [`crate::task::LocalKey`]'s module docs for exactly what "task-local"
+/// means here and when a scoped value is actually visible.
+///
+/// ```
+/// # use rusty_tokio::Runtime;
+/// # let rt = Runtime::new().unwrap();
+/// rusty_tokio::task_local! {
+///     static REQUEST_ID: u32;
+/// }
+///
+/// # rt.block_on(async {
+/// REQUEST_ID
+///     .scope(42, async {
+///         assert_eq!(REQUEST_ID.with(|id| *id), 42);
+///     })
+///     .await;
+///
+/// // Outside of that scope, the value is gone again.
+/// assert!(REQUEST_ID.try_with(|id| *id).is_err());
+/// # });
+/// ```
+#[macro_export]
+macro_rules! task_local {
+    () => {};
+
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty; $($rest:tt)*) => {
+        $(#[$attr])*
+        $vis static $name: $crate::task::LocalKey<$ty> = {
+            ::std::thread_local! {
+                static __KEY: ::std::cell::RefCell<::std::option::Option<$ty>> =
+                    const { ::std::cell::RefCell::new(::std::option::Option::None) };
+            }
+            $crate::task::LocalKey { __inner: __KEY }
+        };
+        $crate::task_local! { $($rest)* }
+    };
+}

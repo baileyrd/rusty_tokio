@@ -23,6 +23,7 @@ mod id;
 mod join;
 mod join_set;
 mod local;
+mod local_key;
 mod state;
 mod yield_now;
 
@@ -31,6 +32,7 @@ pub use id::{try_id, try_name, TaskId};
 pub use join::{JoinError, JoinHandle};
 pub use join_set::JoinSet;
 pub use local::{spawn_local, LocalSet};
+pub use local_key::{AccessError, LocalKey, TaskLocalFuture};
 pub use yield_now::{yield_now, YieldNow};
 
 use crate::runtime::Shared;

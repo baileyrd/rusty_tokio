@@ -38,6 +38,18 @@ rustils' API can't support them yet.
   .name("...").spawn(future)` is the alternative to plain `crate::spawn`
   that actually sets a name -- plain `spawn`/`spawn_local`'d tasks always
   have `try_name() == None`.
+- **`task_local!`/`task::LocalKey`**: implicit, per-task context (a
+  request ID, a connection-scoped config value) that inner async calls
+  read via `KEY.with(|v| ...)` without it being threaded through every
+  function signature explicitly. `KEY.scope(value, future).await` is
+  what actually makes it visible: the real, underlying `thread_local!`
+  slot holds `value` only for the exact duration of each poll of
+  `future` (restored immediately afterward, even if that poll panics),
+  so a *different* task polled on the same worker thread in between two
+  polls of this one never sees it -- the exact case a plain
+  `std::thread_local!` would get wrong, since many tasks' polls
+  interleave on one OS thread. Also `sync_scope` for a plain synchronous
+  closure instead of a future, and `try_with` for a non-panicking read.
 - **`LocalSet`/`spawn_local`**: a place to spawn `!Send` futures --
   holding an `Rc`, a `RefCell`-guarded value, or any other non-thread-safe
   handle -- which `crate::spawn` can never accept, since every task
