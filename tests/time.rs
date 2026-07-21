@@ -1,4 +1,4 @@
-use rusty_tokio::time::interval_at;
+use rusty_tokio::time::{interval_at, MissedTickBehavior};
 use rusty_tokio::Runtime;
 use std::time::{Duration, Instant};
 
@@ -25,5 +25,97 @@ fn interval_at_second_tick_is_exactly_one_period_after_start() {
         let second = ticker.tick().await;
         assert_eq!(first, start);
         assert_eq!(second, start + period);
+    });
+}
+
+#[test]
+fn missed_tick_default_is_burst() {
+    let ticker = interval_at(Instant::now(), Duration::from_millis(10));
+    assert_eq!(ticker.missed_tick_behavior(), MissedTickBehavior::Burst);
+}
+
+#[test]
+fn missed_tick_burst_fires_every_missed_deadline_back_to_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let period = Duration::from_millis(20);
+        let start = Instant::now();
+        let mut ticker = interval_at(start, period);
+        let first = ticker.tick().await;
+        assert_eq!(first, start);
+
+        // Let several periods elapse without calling tick() again.
+        rusty_tokio::time::sleep(period * 4).await;
+
+        let before = Instant::now();
+        let second = ticker.tick().await;
+        let third = ticker.tick().await;
+        assert_eq!(second, start + period);
+        assert_eq!(third, start + period * 2);
+        // Both already-overdue deadlines should fire back-to-back with
+        // no real waiting in between -- the whole point of "burst".
+        assert!(before.elapsed() < period);
+    });
+}
+
+#[test]
+fn missed_tick_skip_jumps_to_the_next_future_deadline_without_bursting() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let period = Duration::from_millis(20);
+        let start = Instant::now();
+        let mut ticker = interval_at(start, period);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        assert_eq!(ticker.missed_tick_behavior(), MissedTickBehavior::Skip);
+        let first = ticker.tick().await;
+        assert_eq!(first, start);
+
+        rusty_tokio::time::sleep(period * 4).await;
+
+        // The first post-gap tick still reports the originally-missed
+        // deadline -- Skip only changes what's scheduled *next*.
+        let second = ticker.tick().await;
+        assert_eq!(second, start + period);
+
+        // The next deadline should have jumped straight to a
+        // still-in-the-future, period-aligned instant rather than the
+        // very next tick in the original grid (`start + 2 * period`,
+        // already in the past by now) -- so this call actually has to
+        // wait, unlike Burst's back-to-back catch-up above.
+        let before = Instant::now();
+        let third = ticker.tick().await;
+        assert!(third > start + period * 2);
+        assert!(before.elapsed() > Duration::from_millis(1));
+    });
+}
+
+#[test]
+fn missed_tick_delay_resets_the_schedule_from_the_actual_fire_time() {
+    // Unlike the Burst/Skip tests above, this never asserts a tick's
+    // deadline equals `start + n * period` exactly: Delay recomputes
+    // the *next* deadline from whenever each tick actually fires, not
+    // from the original grid -- including the very first tick, whose
+    // completion happens a few microseconds after `start`, not exactly
+    // at it. What Delay actually guarantees is checked here instead:
+    // after a long gap, the next tick waits close to one fresh period,
+    // not "already overdue" (Burst) or "several periods skipped" (Skip).
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let period = Duration::from_millis(20);
+        let mut ticker = interval_at(Instant::now(), period);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        assert_eq!(ticker.missed_tick_behavior(), MissedTickBehavior::Delay);
+        ticker.tick().await;
+
+        rusty_tokio::time::sleep(period * 4).await;
+
+        let before_second = Instant::now();
+        ticker.tick().await; // still fires immediately -- already overdue
+
+        let before_third = Instant::now();
+        let third = ticker.tick().await;
+        assert!(third >= before_second + period);
+        assert!(third < before_second + period * 2);
+        assert!(before_third.elapsed() < period * 2);
     });
 }
