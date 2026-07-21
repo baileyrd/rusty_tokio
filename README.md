@@ -75,11 +75,13 @@ rustils' API can't support them yet.
   tokio's/`futures-io`'s -- `Pin<&mut Self>`, `poll_*` methods -- but
   this crate's own definitions, not a re-export) plus a generic `copy`,
   so code doesn't need to be written against the concrete `TcpStream`
-  type. `TcpStream::split`/`into_split` give borrowed (`ReadHalf`/
-  `WriteHalf`) or owned, independently `'static` (`OwnedReadHalf`/
-  `OwnedWriteHalf`) read/write halves for the two-tasks-one-stream
+  type. `TcpStream::split`/`into_split` (and, identically,
+  `UnixStream::split`/`into_split`) give borrowed (`ReadHalf`/
+  `WriteHalf`, or `UnixReadHalf`/`UnixWriteHalf`) or owned, independently
+  `'static` (`OwnedReadHalf`/`OwnedWriteHalf`, or `OwnedUnixReadHalf`/
+  `OwnedUnixWriteHalf`) read/write halves for the two-tasks-one-stream
   pattern, without callers having to reach for `Arc` themselves the way
-  the shared `&TcpStream` impls otherwise require.
+  the shared `&TcpStream`/`&UnixStream` impls otherwise require.
 
   **This crate's macOS integration has never run on real hardware.**
   It's developed and tested on Linux only; the kqueue reactor and the

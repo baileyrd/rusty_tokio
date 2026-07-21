@@ -31,4 +31,6 @@ pub use async_io::{copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Rea
 pub use compat::Compat;
 pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
 pub use udp::UdpSocket;
-pub use unix::{UnixListener, UnixStream};
+pub use unix::{
+    OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixStream, UnixWriteHalf,
+};

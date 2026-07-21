@@ -1,4 +1,4 @@
-use rusty_tokio::io::{UnixListener, UnixStream};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, UnixListener, UnixStream};
 use rusty_tokio::Runtime;
 
 fn temp_socket_path(name: &str) -> std::path::PathBuf {
@@ -11,6 +11,62 @@ fn temp_socket_path(name: &str) -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+#[test]
+fn unix_into_split_moves_owned_halves_into_separate_tasks() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let path = temp_socket_path("into_split");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (mut read_half, mut write_half) = client.into_split();
+
+        let writer_task = rusty_tokio::spawn(async move { write_half.write_all(b"hello").await });
+
+        let mut buf = [0u8; 5];
+        read_half.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        writer_task.await.unwrap().unwrap();
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unix_split_borrows_read_and_write_halves_from_one_task() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("split");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let mut client = UnixStream::connect(&path).await.unwrap();
+        let (mut read_half, mut write_half) = client.split();
+
+        write_half.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        read_half.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
