@@ -89,6 +89,32 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
+    /// Splits into borrowed read/write halves, for concurrent read/write
+    /// access without needing a full `Arc`-wrapped clone -- e.g. racing
+    /// a read against a write from within the same task. For halves that
+    /// can be moved into two separate spawned tasks, see
+    /// [`TcpStream::into_split`].
+    ///
+    /// This is purely a borrow-splitting convenience: the underlying
+    /// concurrent-access support already exists on `&TcpStream` (see the
+    /// `AsyncRead`/`AsyncWrite` impls below), which is all `split` hands
+    /// out under two different names.
+    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
+        (ReadHalf(self), WriteHalf(self))
+    }
+
+    /// Splits into owned read/write halves, each independently `'static`
+    /// and movable into its own spawned task without the call site
+    /// needing to wrap the stream in an `Arc` itself. Internally this
+    /// *is* just an `Arc<TcpStream>` behind each half -- the same
+    /// pattern [`tests/async_io.rs`'s `shared_ref_impl_*` test]
+    /// exercises by hand -- `into_split` only saves callers from doing
+    /// that wrapping themselves.
+    pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+        let inner = Arc::new(self);
+        (OwnedReadHalf(inner.clone()), OwnedWriteHalf(inner))
+    }
+
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub async fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
@@ -245,5 +271,65 @@ impl AsyncWrite for TcpStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut &*self.get_mut()).poll_shutdown(cx)
+    }
+}
+
+/// Borrowed read half of a [`TcpStream`], created by [`TcpStream::split`].
+pub struct ReadHalf<'a>(&'a TcpStream);
+
+/// Borrowed write half of a [`TcpStream`], created by [`TcpStream::split`].
+pub struct WriteHalf<'a>(&'a TcpStream);
+
+impl AsyncRead for ReadHalf<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for WriteHalf<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// Owned read half of a [`TcpStream`], created by [`TcpStream::into_split`].
+pub struct OwnedReadHalf(Arc<TcpStream>);
+
+/// Owned write half of a [`TcpStream`], created by [`TcpStream::into_split`].
+pub struct OwnedWriteHalf(Arc<TcpStream>);
+
+impl AsyncRead for OwnedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for OwnedWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &*self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut().0).poll_shutdown(cx)
     }
 }
