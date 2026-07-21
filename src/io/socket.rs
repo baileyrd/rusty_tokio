@@ -208,3 +208,16 @@ pub(crate) fn write(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
         Ok(n as usize)
     }
 }
+
+/// `shutdown(2)` with `SHUT_WR` -- backs `AsyncWrite::poll_shutdown`,
+/// signaling EOF to the peer without closing the fd itself (that still
+/// happens on `Drop`, same as ever). Not exposed by rustils, which has
+/// no async writer half needing a distinct "done writing" signal.
+pub(crate) fn shutdown_write(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is caller-owned and open.
+    if unsafe { libc::shutdown(fd, libc::SHUT_WR) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}

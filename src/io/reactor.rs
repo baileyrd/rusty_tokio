@@ -81,6 +81,32 @@ impl ScheduledIo {
     }
 }
 
+/// Run `op` once `interest` readiness is available, in a `Poll`-based
+/// shape rather than an `async fn` -- the primitive [`AsyncRead`]/
+/// [`AsyncWrite`](super::async_io)'s `poll_read`/`poll_write` need,
+/// since they can't `.await` anything themselves. [`ready_io`] below is
+/// just this wrapped in `poll_fn` for callers that can.
+pub(crate) fn poll_io<T>(
+    io: &Arc<ScheduledIo>,
+    interest: Interest,
+    cx: &mut Context<'_>,
+    mut op: impl FnMut() -> io::Result<T>,
+) -> Poll<io::Result<T>> {
+    loop {
+        if io.poll_ready(cx, interest).is_pending() {
+            return Poll::Pending;
+        }
+        match op() {
+            Ok(v) => return Poll::Ready(Ok(v)),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                io.clear(interest);
+                continue;
+            }
+            Err(e) => return Poll::Ready(Err(e)),
+        }
+    }
+}
+
 /// Run `op` in a loop, waiting for `interest` readiness on `io` between
 /// attempts, until it succeeds or fails with something other than
 /// `WouldBlock`.
@@ -89,17 +115,7 @@ pub(crate) async fn ready_io<T>(
     interest: Interest,
     mut op: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {
-    loop {
-        std::future::poll_fn(|cx| io.poll_ready(cx, interest)).await;
-        match op() {
-            Ok(v) => return Ok(v),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                io.clear(interest);
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    std::future::poll_fn(|cx| poll_io(io, interest, cx, &mut op)).await
 }
 
 pub(crate) struct Reactor {

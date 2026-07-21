@@ -29,7 +29,11 @@ hand-rolled because rustils' API can't support them yet.
   -- edge-triggered epoll requires every reader to drain a fd to
   `EWOULDBLOCK` or risk missing events forever, an easy invariant to get
   subtly wrong for one extra syscall's worth of savings. Socket setup
-  goes through `rustils`; see "Built on rustils" below.
+  goes through `rustils`; see "Built on rustils" below. Also includes an
+  `AsyncRead`/`AsyncWrite` trait pair (shaped like tokio's/`futures-io`'s
+  -- `Pin<&mut Self>`, `poll_*` methods -- but this crate's own
+  definitions, not a re-export) plus a generic `copy`, so code doesn't
+  need to be written against the concrete `TcpStream` type.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, and `interval`,
   backed by a single background thread holding a min-heap of deadlines.
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
@@ -118,9 +122,11 @@ edges instead of papering over them:
 - **Linux only.** The reactor is built directly on `epoll`, `eventfd`,
   and `accept4`. A `kqueue` (macOS/BSD) or IOCP (Windows) backend behind
   the same `ScheduledIo` interface is doable, just not done.
-- **No `AsyncRead`/`AsyncWrite` trait interop.** `TcpStream` exposes
-  plain inherent `async fn read`/`write` rather than the trait pair the
-  wider ecosystem (codec/framing crates, etc.) expects.
+- **`AsyncRead`/`AsyncWrite` are this crate's own traits, not tokio's or
+  `futures-io`'s.** Same shape, so generic code within this project works
+  the same way, but a third-party codec/framing crate built against
+  tokio's actual trait won't accept this crate's `TcpStream` without a
+  shim.
 - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
   Correct and simple; a real lock-free Chase-Lev deque (what tokio
   itself uses) would scale better under heavy contention.

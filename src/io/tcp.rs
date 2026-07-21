@@ -1,11 +1,14 @@
-use super::reactor::{ready_io, Interest, Reactor, ScheduledIo};
+use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
+use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use platform_linux::{LinuxTcpListener, LinuxTcpStream};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// A non-blocking, epoll-driven TCP listener, backed by rustils'
 /// `LinuxTcpListener` for bind/accept/addressing.
@@ -59,10 +62,11 @@ impl Drop for TcpListener {
 /// actual `read`/`write` syscalls are hand-rolled -- see `socket.rs`'s
 /// module docs for why.
 ///
-/// This exposes plain `async fn read`/`write` rather than the
-/// `AsyncRead`/`AsyncWrite` trait pair real ecosystems standardize on --
-/// scoped out here to keep the surface small; see the crate-level docs
-/// for what's deliberately left for later.
+/// Exposes both a plain `&self` `async fn read`/`write` pair (so one
+/// task can read while another writes the same stream, e.g. via two
+/// `Arc<TcpStream>` clones) and the [`AsyncRead`]/[`AsyncWrite`] trait
+/// pair for generic code -- see `async_io.rs`'s module docs for why both
+/// exist and how they share one implementation.
 pub struct TcpStream {
     inner: LinuxTcpStream,
     io: Arc<ScheduledIo>,
@@ -145,10 +149,86 @@ impl TcpStream {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         platform::net::TcpStream::local_addr(&self.inner).map_err(from_platform_err)
     }
+
+    fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, Interest::Read, cx, || {
+            socket::read(self.inner.as_raw_fd(), buf)
+        })
+    }
+
+    fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, Interest::Write, cx, || {
+            socket::write(self.inner.as_raw_fd(), buf)
+        })
+    }
 }
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
         self.reactor.deregister(self.inner.as_raw_fd());
+    }
+}
+
+/// The real `AsyncRead` logic: only ever needs shared access, since the
+/// reactor readiness state and the fd are both already behind `Arc`/a
+/// kernel-owned handle. This is what lets two `&TcpStream`s -- e.g. from
+/// [`std::io::copy`]-style code split across two tasks -- read and write
+/// concurrently through the trait, the same as the inherent methods.
+impl AsyncRead for &TcpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.poll_read_priv(cx, buf.unfilled_mut()) {
+            Poll::Ready(Ok(n)) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for &TcpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_priv(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(socket::shutdown_write(self.inner.as_raw_fd()))
+    }
+}
+
+/// Delegates to the `&TcpStream` impl above -- an owned `TcpStream` only
+/// ever needed shared access internally too, so `&mut self` here is
+/// purely to match the trait's usual shape, not a real exclusivity
+/// requirement.
+impl AsyncRead for TcpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut()).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TcpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &*self.get_mut()).poll_write(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut()).poll_shutdown(cx)
     }
 }

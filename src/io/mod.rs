@@ -7,10 +7,12 @@
 //! rather than reimplemented here -- see `socket.rs`'s module docs for
 //! the (small) remainder that's still hand-rolled and why.
 
+mod async_io;
 pub(crate) mod reactor;
 mod socket;
 mod tcp;
 mod udp;
 
+pub use async_io::{copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 pub use tcp::{TcpListener, TcpStream};
 pub use udp::UdpSocket;
