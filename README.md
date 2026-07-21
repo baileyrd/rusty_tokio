@@ -6,10 +6,11 @@ async runtime works, not to replace tokio.
 
 The scheduler, reactor, timers, and sync primitives are all original code
 here. Socket lifecycle (bind/connect/accept/addressing) is built on top of
-[`rustils`](https://github.com/baileyrd/rustils)' `platform`/`platform-linux`
-crates rather than reimplemented a second time -- see "Built on rustils"
-below for exactly which seam that is and which two syscalls stayed
-hand-rolled because rustils' API can't support them yet.
+[`rustils`](https://github.com/baileyrd/rustils)'
+`platform`/`platform-linux`/`platform-macos` crates rather than
+reimplemented a second time -- see "Built on rustils" below for exactly
+which seam that is and which two syscalls stayed hand-rolled because
+rustils' API can't support them yet.
 
 ## What's here
 
@@ -26,25 +27,27 @@ hand-rolled because rustils' API can't support them yet.
   one goes idle.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
   `TcpListener`, and `UdpSocket`. Two backends behind the same interface
-  -- `epoll` on Linux, `kevent` on macOS/BSD -- both level-triggered by
+  -- `epoll` on Linux, `kevent` on macOS -- both level-triggered by
   choice, since edge-triggered epoll/kqueue demands every reader drain a
   fd to `EWOULDBLOCK` or risk missing events forever, an easy invariant
   to get subtly wrong for one extra syscall's worth of savings. Socket
-  setup goes through `rustils` on Linux; macOS/BSD hand-roll their own
-  (rustils has no backend there yet) -- see "Built on rustils" below.
+  setup goes through `rustils` on both -- see "Built on rustils" below.
   Also includes an `AsyncRead`/`AsyncWrite` trait pair (shaped like
   tokio's/`futures-io`'s -- `Pin<&mut Self>`, `poll_*` methods -- but
   this crate's own definitions, not a re-export) plus a generic `copy`,
   so code doesn't need to be written against the concrete `TcpStream`
   type.
 
-  **macOS/BSD support has never run on real hardware.** This crate is
-  developed and tested on Linux only; the macOS/BSD reactor and socket
-  code is verified with `cargo check --target x86_64-apple-darwin`
-  (real macOS `libc` bindings, real type-checking -- and it did catch
-  real bugs: BSD's extra `sockaddr` length byte, raw-pointer type
-  inference, a couple of missing error conversions) but nothing beyond
-  that. Treat it as reviewed-but-unverified until someone actually runs
+  **This crate's macOS integration has never run on real hardware.**
+  It's developed and tested on Linux only; the kqueue reactor and the
+  `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of rustils'
+  `platform-macos` are verified with `cargo check --target
+  x86_64-apple-darwin` (real macOS `libc` bindings, real type-checking)
+  but nothing beyond that. `platform-macos` itself is better off: it has
+  real `macos-latest` CI upstream, which already caught a genuine
+  `AF_UNIX` bug the cross-check alone couldn't -- so the socket layer is
+  solid, but this crate's own reactor integration on top of it is still
+  reviewed-but-unverified until someone actually runs *this* crate's
   `cargo test` on a Mac.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, and `interval`,
   backed by a single background thread holding a min-heap of deadlines.
@@ -109,16 +112,16 @@ and (for UDP) `send_to`/`recv_from` -- all of rustils' own sockaddr
 packing/unpacking, `SO_REUSEADDR`, and stale-socket handling, not
 reimplemented a second time here.
 
-Two things stayed hand-rolled in `io/socket.rs`, both because of a real
-mismatch rather than taste:
+Two things stayed hand-rolled in `io/socket/mod.rs`, both because of a
+real mismatch rather than taste:
 
 - **Non-blocking `connect`.** `LinuxTcpStream::connect` creates a
   *blocking* socket and calls a blocking `connect(2)` -- correct for
   rustils' own callers, but it would stall an entire worker thread for a
   connection's RTT if used here directly. An async connect needs the
   socket non-blocking *before* `connect(2)`, so it's created and
-  connected by hand, then the resulting fd is adopted into a
-  `LinuxTcpStream` via `From<OwnedFd>` for everything after.
+  connected by hand, then the resulting fd is adopted into the concrete
+  stream type via `From<OwnedFd>` for everything after.
 - **`read`/`write`.** `platform::net::TcpStream::read`/`write` take
   `&mut self` -- fine for rustils' blocking callers, wrong for this
   runtime's `TcpStream`, which deliberately exposes `&self` methods so
@@ -126,23 +129,37 @@ mismatch rather than taste:
   trait for these two (a raw `read`/`write` on an fd already in hand via
   `AsRawFd`) keeps that API instead of hiding a mutex behind it.
 
-`rustils` has no macOS backend at all, though, so none of the above
-applies there: `io/socket/macos.rs` hand-rolls bind/listen/accept/UDP
-directly against `libc` (mirroring rustils' concrete-type shape closely
-enough -- same method names, same `platform::error::Result` -- that
-`tcp.rs`/`udp.rs` need only a `#[cfg]`-gated type alias, not their own
-branching). See the macOS/BSD caveat above -- this half is
-compile-checked only, never run.
+`rustils` had no macOS backend at all for a while, so this crate first
+had to hand-roll one (`io/socket/macos.rs`, since deleted). That gap was
+filed as [rustils#48](https://github.com/baileyrd/rustils/issues/48) --
+pointing at the hand-rolled shim as reference material -- and landed as
+`platform-macos` in
+[rustils#52](https://github.com/baileyrd/rustils/pull/52), shaped to
+match `platform_linux` closely enough (same method names, same
+`platform::error::Result`, the rustils#41/#42 `AsFd`/`set_nonblocking`
+surface included from day one) that `io/tcp.rs`/`io/udp.rs` need only a
+`#[cfg]`-gated type alias between `platform_linux`/`platform_macos`, not
+their own branching. The same two hand-rolled exceptions above apply on
+macOS too, for the same reasons.
+[rustils#53](https://github.com/baileyrd/rustils/pull/53) then added a
+real `macos-latest` CI leg for `platform-macos`, which caught a genuine
+`AF_UNIX` behavioral bug the cross-target `cargo check` this crate still
+relies on could not have found -- see the macOS caveat above for what
+that does and doesn't cover on *this* crate's side of the boundary.
 
 ## What's deliberately not here (yet)
 
 This is a real, working runtime, not a toy -- but it's honest about its
 edges instead of papering over them:
 
-- **No Windows.** Linux (`epoll`) and macOS/BSD (`kevent`, see the
-  caveat above) both have a reactor backend; an IOCP backend behind the
-  same `ScheduledIo` interface would need a hand-rolled Windows socket
-  layer too (no rustils backend there either), doable but not done.
+- **No Windows or generic BSD.** Linux (`epoll`) and macOS (`kevent`,
+  see the caveat above) both have a reactor backend; an IOCP backend
+  behind the same `ScheduledIo` interface would need a Windows socket
+  layer too (no rustils backend there yet, unlike macOS now), doable
+  but not done. Generic BSD (FreeBSD/OpenBSD/etc.) could likely reuse
+  the `kevent` reactor as-is, but `platform-macos` itself only claims
+  `target_os = "macos"`, not BSD generally, so there's no socket layer
+  to pair it with yet either.
 - **`AsyncRead`/`AsyncWrite` are this crate's own traits, not tokio's or
   `futures-io`'s.** Same shape, so generic code within this project works
   the same way, but a third-party codec/framing crate built against
@@ -161,8 +178,8 @@ cargo test      # unit tests for the task state machine, plus integration
                 # TCP/UDP over the real reactor, and every sync primitive
 cargo clippy --all-targets
 
-# macOS/BSD reactor and socket code: compiles and type-checks, but
-# nothing beyond that -- see the macOS/BSD caveat above.
+# This crate's macOS reactor integration: compiles and type-checks, but
+# nothing beyond that -- see the macOS caveat above.
 rustup target add x86_64-apple-darwin
 cargo check --target x86_64-apple-darwin --all-targets
 ```

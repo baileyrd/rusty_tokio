@@ -1,5 +1,5 @@
 //! The I/O reactor: one background thread blocked in the OS's readiness
-//! syscall (`epoll_wait` on Linux, `kevent` on macOS/BSD), translating
+//! syscall (`epoll_wait` on Linux, `kevent` on macOS), translating
 //! readiness events into waker calls. Level-triggered, on purpose --
 //! edge-triggered epoll/kqueue demands that every reader drain a fd
 //! until it sees `EWOULDBLOCK` or risk missing events forever, which is
@@ -19,9 +19,9 @@ mod epoll;
 #[cfg(target_os = "linux")]
 pub(crate) use epoll::Reactor;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 mod kqueue;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 pub(crate) use kqueue::Reactor;
 
 use std::io;

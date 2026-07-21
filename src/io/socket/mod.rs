@@ -1,32 +1,23 @@
-//! Socket plumbing, split into what's genuinely shared across OSes
-//! (sockaddr packing, the non-blocking `connect` dance, raw `read`/
-//! `write`) and what isn't (socket lifecycle: bind/listen/accept/UDP,
-//! addressing, socket options).
+//! The sliver of raw-`libc` socket code this crate still needs after
+//! adopting `rustils`' `platform_linux`/`platform_macos` crates for
+//! socket lifecycle (bind/listen/accept/UDP), addressing, and socket
+//! options -- see `tcp.rs`/`udp.rs`, which use those directly.
 //!
-//! On Linux, the OS-specific half is `rustils`' `platform_linux` crate,
-//! used directly from `tcp.rs`/`udp.rs` -- see this module's original
-//! docs (still below) for exactly what stayed hand-rolled even there.
-//! `rustils` has no macOS backend, so `macos.rs` hand-rolls the
-//! equivalent surface directly against `libc`, shaped closely enough
-//! (`MacosTcpStream`/`MacosTcpListener`/`MacosUdpSocket`, matching
-//! method names) that `tcp.rs`/`udp.rs` need only a `#[cfg]`-gated type
-//! alias, not OS-specific logic of their own.
+//! Two things are deliberately still hand-rolled here on *every* OS
+//! instead:
 //!
-//! (Original docs, from when this crate first adopted `rustils` for the
-//! Linux socket layer -- rustils#41 / PR baileyrd/rustils#42 -- and
-//! still describe what's hand-rolled on Linux specifically:)
-//!
-//! - **Non-blocking `connect`.** `LinuxTcpStream::connect` creates a
-//!   *blocking* socket and calls a blocking `connect(2)` internally --
-//!   correct for rustils' own blocking-I/O consumers, but exactly wrong
-//!   for an async runtime: it would stall a whole worker thread for the
-//!   connection's RTT. An async connect needs the socket to already be
-//!   non-blocking *before* `connect(2)` is called, so it returns
-//!   `EINPROGRESS` immediately and the reactor waits for writability
-//!   instead. Nothing in rustils' public surface exposes "create a bare
-//!   socket, don't connect yet", so that one syscall pair (`socket` +
-//!   `connect`) stays here; the resulting fd is then adopted into a
-//!   `LinuxTcpStream` via `From<OwnedFd>` for everything after.
+//! - **Non-blocking `connect`.** `{Linux,Macos}TcpStream::connect`
+//!   creates a *blocking* socket and calls a blocking `connect(2)`
+//!   internally -- correct for rustils' own blocking-I/O consumers, but
+//!   exactly wrong for an async runtime: it would stall a whole worker
+//!   thread for the connection's RTT. An async connect needs the socket
+//!   to already be non-blocking *before* `connect(2)` is called, so it
+//!   returns `EINPROGRESS` immediately and the reactor waits for
+//!   writability instead. Nothing in rustils' public surface exposes
+//!   "create a bare socket, don't connect yet", so that one syscall pair
+//!   (`socket` + `connect`) stays here; the resulting fd is then adopted
+//!   into the concrete stream type via `From<OwnedFd>` for everything
+//!   after.
 //! - **`read`/`write`.** `platform::net::TcpStream::read`/`write` take
 //!   `&mut self` (a reasonable choice for rustils' own blocking callers,
 //!   who never need to read and write concurrently from two tasks
@@ -36,16 +27,11 @@
 //!   (a raw `read`/`write` on an fd we already have via `AsRawFd`) keeps
 //!   that API intact instead of hiding a mutex behind it.
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) mod macos;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) use macos::{MacosTcpListener, MacosTcpStream, MacosUdpSocket};
-
 use libc::{c_int, sockaddr, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t};
 use platform::error::{OsCode, PlatformError};
 use std::io;
 use std::mem;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 fn cvt(ret: c_int) -> io::Result<c_int> {
@@ -56,14 +42,14 @@ fn cvt(ret: c_int) -> io::Result<c_int> {
     }
 }
 
-pub(crate) fn domain_for(addr: SocketAddr) -> c_int {
+fn domain_for(addr: SocketAddr) -> c_int {
     match addr {
         SocketAddr::V4(_) => libc::AF_INET,
         SocketAddr::V6(_) => libc::AF_INET6,
     }
 }
 
-pub(crate) fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
+fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
     // SAFETY: an all-zero `sockaddr_storage` is a valid (if inert)
     // value for this plain-old-data type; only the variant selected by
     // `ss_family` (written below) is ever read back by the kernel.
@@ -117,50 +103,12 @@ pub(crate) fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
     (storage, len as socklen_t)
 }
 
-/// The inverse of [`to_sockaddr`] -- unused on Linux (rustils does its
-/// own unpacking there) but shared with `macos.rs`, which has nothing
-/// else to reach for.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-pub(crate) fn from_sockaddr(storage: &sockaddr_storage) -> io::Result<SocketAddr> {
-    match storage.ss_family as c_int {
-        libc::AF_INET => {
-            // SAFETY: `ss_family == AF_INET` means the kernel filled this
-            // buffer as a `sockaddr_in`, which fits within
-            // `sockaddr_storage`; reading it back that way mirrors what
-            // `to_sockaddr` wrote.
-            let sin = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in>() };
-            let ip = Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes());
-            Ok(SocketAddr::V4(SocketAddrV4::new(
-                ip,
-                u16::from_be(sin.sin_port),
-            )))
-        }
-        libc::AF_INET6 => {
-            // SAFETY: see the V4 arm above, for `sockaddr_in6`.
-            let sin6 = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in6>() };
-            let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            Ok(SocketAddr::V6(SocketAddrV6::new(
-                ip,
-                u16::from_be(sin6.sin6_port),
-                sin6.sin6_flowinfo,
-                sin6.sin6_scope_id,
-            )))
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unrecognized address family",
-        )),
-    }
-}
-
 /// Adapts `rustils`' two-axis `PlatformError` to `std::io::Error` so it
 /// composes with the rest of this crate's (and every caller's) plain
-/// `io::Result`-based API. This is effectively always the `Errno` arm on
-/// every backend (Linux via rustils, macOS via [`macos`]'s own
-/// hand-rolled `PlatformError`s), which round-trips through std's own
-/// errno mapping -- so e.g. `EAGAIN` still comes back as
-/// `io::ErrorKind::WouldBlock`, exactly what `reactor::ready_io`'s retry
-/// loop checks for.
+/// `io::Result`-based API. This is effectively always the `Errno` arm,
+/// which round-trips through std's own errno mapping -- so e.g.
+/// `EAGAIN` still comes back as `io::ErrorKind::WouldBlock`, exactly
+/// what `reactor::ready_io`'s retry loop checks for.
 pub(crate) fn from_platform_err(e: PlatformError) -> io::Error {
     if let OsCode::Errno(errno) = e.os {
         return io::Error::from_raw_os_error(errno);
@@ -168,51 +116,60 @@ pub(crate) fn from_platform_err(e: PlatformError) -> io::Error {
     io::Error::other(e)
 }
 
-/// A bare, non-blocking socket of the given `domain`/`type` -- not yet
-/// bound or connected. Nothing in rustils' public surface creates a
-/// socket without also connecting (blocking) or binding it, so this
-/// stays hand-rolled on every OS; see this module's docs.
-fn new_socket(domain: c_int, ty: c_int) -> io::Result<OwnedFd> {
+/// A bare, non-blocking socket -- not yet bound or connected. Nothing in
+/// rustils' public surface creates a socket without also connecting
+/// (blocking) or binding it, so this one syscall stays hand-rolled; see
+/// this module's docs.
+pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: plain integer arguments, no memory referenced.
-        let fd = unsafe { libc::socket(domain, ty | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) };
+        let fd = unsafe {
+            libc::socket(
+                domain_for(addr),
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
         cvt(fd)?;
         // SAFETY: `fd` was just returned by `socket(2)` and is valid,
         // otherwise-unowned, and wrapped exactly once.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     {
-        // macOS/BSD have no `SOCK_NONBLOCK`/`SOCK_CLOEXEC` socket-type
-        // flags -- that's a Linux extension -- so both are set via
-        // `fcntl` right after creation instead of atomically at
-        // `socket(2)` time. This leaves a window (between `socket()`
-        // returning and the `fcntl` calls completing) where a
-        // concurrent `fork` elsewhere in the process could inherit this
-        // fd; this crate never forks, so that window is never exercised
-        // in practice, but it's the reason Linux's atomic flags exist.
+        // macOS has no `SOCK_NONBLOCK`/`SOCK_CLOEXEC` socket-type flags
+        // -- that's a Linux extension -- so both are set via `fcntl`
+        // right after creation instead of atomically at `socket(2)`
+        // time (the same reasoning `platform_macos::sys::net`'s own
+        // socket-creating calls document). This leaves a window
+        // (between `socket()` returning and the `fcntl` calls
+        // completing) where a concurrent `fork` elsewhere in the
+        // process could inherit this fd; this crate never forks, so
+        // that window is never exercised in practice.
         //
         // SAFETY: plain integer arguments, no memory referenced.
-        let fd = unsafe { libc::socket(domain, ty, 0) };
+        let fd = unsafe { libc::socket(domain_for(addr), libc::SOCK_STREAM, 0) };
         cvt(fd)?;
         // SAFETY: `fd` was just returned by `socket(2)` and is valid,
         // otherwise-unowned, and wrapped exactly once.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // `set_nonblocking` is `pub` in `platform_macos::sys::net` (it
+        // only needs `&OwnedFd`, not one of that crate's own concrete
+        // types), so it's reused directly rather than hand-rolled a
+        // second time. `set_cloexec` is private there, unlike
+        // `set_nonblocking` -- platform-macos's own socket-creating
+        // calls need it internally but never expose it standalone, so
+        // this one `fcntl` stays hand-rolled.
+        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
         use std::os::fd::AsRawFd;
-        macos::set_nonblocking(owned.as_raw_fd(), true).map_err(from_platform_err)?;
-        macos::set_cloexec(owned.as_raw_fd()).map_err(from_platform_err)?;
+        // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
+        // sole variadic argument `F_SETFD` expects.
+        if unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(owned)
     }
-}
-
-pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
-    new_socket(domain_for(addr), libc::SOCK_STREAM)
-}
-
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-pub(crate) fn new_udp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
-    new_socket(domain_for(addr), libc::SOCK_DGRAM)
 }
 
 /// `connect(2)` on a non-blocking socket returns `EINPROGRESS`
