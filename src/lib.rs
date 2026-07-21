@@ -11,6 +11,8 @@
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
 //!   that module's docs for why a naive "channel of `Arc<Task>`"
 //!   design has a real lost-wakeup bug under multi-threaded execution.
+//!   Also [`task::yield_now`], for a task that wants to cooperate with
+//!   others without splitting itself across multiple spawns.
 //! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
 //!   with its own run queue, backed by a shared injector queue and
 //!   able to steal from one another. `Runtime::shutdown_background`/

@@ -20,8 +20,10 @@
 
 mod join;
 mod state;
+mod yield_now;
 
 pub use join::{JoinError, JoinHandle};
+pub use yield_now::{yield_now, YieldNow};
 
 use crate::runtime::Shared;
 use join::{AbnormalHook, JoinInner, Outcome};
