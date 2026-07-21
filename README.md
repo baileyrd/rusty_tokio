@@ -120,8 +120,12 @@ rustils' API can't support them yet.
   by machine; re-run the benchmark rather than trusting these if it
   matters for your use case.
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
-  an async-aware `Mutex`, a `oneshot` channel, and a bounded `mpsc`
-  channel.
+  an async-aware `Mutex`, a `oneshot` channel, a bounded `mpsc` channel,
+  and `mpsc::unbounded_channel` -- same one-lock-covers-queue-and-wakers
+  design as the bounded channel (see `mpsc`'s module docs for the real
+  lost-wakeup bug that shape avoids), just without a capacity check or
+  anywhere for a sender to wait, so `UnboundedSender::send` is a plain
+  synchronous method, not `async fn`.
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker

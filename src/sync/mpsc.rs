@@ -1,7 +1,10 @@
 //! A bounded, multi-producer single-consumer queue. `send().await`
 //! suspends the sending task while the buffer is full instead of
 //! blocking the worker thread; `recv().await` suspends while it's
-//! empty.
+//! empty. [`unbounded_channel`] below is the same idea with the
+//! capacity check (and therefore any need for the sender to ever wait)
+//! removed entirely -- `UnboundedSender::send` is a plain, synchronous
+//! method, not `async fn`, since there's genuinely nothing to await.
 //!
 //! All of the queue, the wakers waiting to send, and the one waker
 //! waiting to receive live under a *single* lock. That's deliberate:
@@ -13,7 +16,9 @@
 //! hypothetical one (it deadlocked the first version of this file's
 //! test suite). One lock covering the check-and-register makes that
 //! race impossible by construction instead of requiring a careful
-//! recheck-after-register dance.
+//! recheck-after-register dance. `unbounded_channel`'s own `Inner`
+//! reuses this same one-lock shape for the queue/`recv_waker` pair, just
+//! without a `send_waiters` list at all -- nothing ever waits to send.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -151,6 +156,114 @@ impl<T> Drop for Receiver<T> {
         for waker in waiters {
             waker.wake();
         }
+    }
+}
+
+struct UnboundedInner<T> {
+    queue: VecDeque<T>,
+    recv_waker: Option<Waker>,
+    senders_alive: usize,
+    receiver_alive: bool,
+}
+
+struct UnboundedShared<T> {
+    inner: Mutex<UnboundedInner<T>>,
+}
+
+pub struct UnboundedSender<T> {
+    shared: Arc<UnboundedShared<T>>,
+}
+
+pub struct UnboundedReceiver<T> {
+    shared: Arc<UnboundedShared<T>>,
+}
+
+pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+    let shared = Arc::new(UnboundedShared {
+        inner: Mutex::new(UnboundedInner {
+            queue: VecDeque::new(),
+            recv_waker: None,
+            senders_alive: 1,
+            receiver_alive: true,
+        }),
+    });
+    (
+        UnboundedSender {
+            shared: shared.clone(),
+        },
+        UnboundedReceiver { shared },
+    )
+}
+
+impl<T> UnboundedSender<T> {
+    /// Pushes `value` onto the queue and returns immediately -- there's
+    /// no capacity to wait on, so unlike the bounded [`Sender::send`]
+    /// this is a plain synchronous method, not `async fn`.
+    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if !guard.receiver_alive {
+            drop(guard);
+            return Err(SendError(value));
+        }
+        guard.queue.push_back(value);
+        let waker = guard.recv_waker.take();
+        drop(guard);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
+
+impl<T> Clone for UnboundedSender<T> {
+    fn clone(&self) -> Self {
+        self.shared.inner.lock().unwrap().senders_alive += 1;
+        UnboundedSender {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> Drop for UnboundedSender<T> {
+    fn drop(&mut self) {
+        let mut guard = self.shared.inner.lock().unwrap();
+        guard.senders_alive -= 1;
+        if guard.senders_alive == 0 {
+            // That was the last sender: wake the receiver so it can see
+            // the channel is now closed instead of waiting forever.
+            let waker = guard.recv_waker.take();
+            drop(guard);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+}
+
+impl<T> UnboundedReceiver<T> {
+    pub async fn recv(&mut self) -> Option<T> {
+        std::future::poll_fn(|cx| {
+            let mut guard = self.shared.inner.lock().unwrap();
+            if let Some(v) = guard.queue.pop_front() {
+                return Poll::Ready(Some(v));
+            }
+            if guard.senders_alive == 0 {
+                return Poll::Ready(None);
+            }
+            guard.recv_waker = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+impl<T> Drop for UnboundedReceiver<T> {
+    fn drop(&mut self) {
+        // No send_waiters to wake here, unlike the bounded Receiver's
+        // Drop -- an unbounded Sender never waits to send, so there's
+        // never anyone parked on this channel besides (at most) the
+        // receiver itself, which is what's dropping right now.
+        self.shared.inner.lock().unwrap().receiver_alive = false;
     }
 }
 

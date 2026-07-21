@@ -88,6 +88,50 @@ fn mpsc_send_blocks_until_capacity_frees_up() {
 }
 
 #[test]
+fn unbounded_send_never_blocks_even_far_past_any_bounded_capacity() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // A bounded channel with any finite capacity would eventually
+        // make one of these `.await`, since `send` here isn't even
+        // `async fn` -- there's nothing to await, and nothing here
+        // should ever suspend the task.
+        for i in 0..10_000 {
+            tx.send(i).unwrap();
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(v) = rx.recv().await {
+            received.push(v);
+        }
+        assert_eq!(received, (0..10_000).collect::<Vec<_>>());
+    });
+}
+
+#[test]
+fn unbounded_send_reports_a_closed_channel_once_the_receiver_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, rx) = mpsc::unbounded_channel::<u32>();
+        drop(rx);
+        assert!(tx.send(1).is_err());
+    });
+}
+
+#[test]
+fn unbounded_recv_returns_none_once_every_sender_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
+        let tx2 = tx.clone();
+        drop(tx);
+        drop(tx2);
+        assert_eq!(rx.recv().await, None);
+    });
+}
+
+#[test]
 fn notify_wakes_a_waiter() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
