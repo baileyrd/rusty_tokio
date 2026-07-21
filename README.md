@@ -183,6 +183,19 @@ rustils' API can't support them yet.
   task awaiting it -- not a parallel handle type -- so panics, abort,
   and `.await` on the returned `JoinHandle` all reuse the same task
   machinery every other spawned task does.
+- **`#[rusty_tokio::main]`/`#[rusty_tokio::test]`**: attribute macros
+  rewriting an `async fn` into the `Runtime::new().unwrap().block_on(
+  async { .. })` boilerplate every example and test in this crate used
+  to spell out by hand. `#[rusty_tokio::test]` also emits `#[test]`
+  itself. Both accept an optional `worker_threads = N` argument
+  (`#[rusty_tokio::main(worker_threads = 4)]`); no other arguments --
+  tokio's own `flavor`/`start_paused`/etc. don't apply here, since this
+  crate has exactly one runtime flavor and no pausable clock (issue
+  #56). Defined in a separate `rusty_tokio-macros` proc-macro crate
+  (this project's first `syn`/`quote`/`proc-macro2` dependency --
+  `proc-macro = true` crates can't export anything but proc-macros, so
+  it can't live inside `rusty_tokio` itself) and re-exported from the
+  main crate, mirroring tokio's own `tokio`/`tokio-macros` split.
 
 ## Example
 

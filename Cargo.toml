@@ -5,7 +5,17 @@ edition = "2021"
 description = "A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives."
 license = "MIT"
 
+# `rusty_tokio-macros` (the `#[main]`/`#[test]` proc-macro attributes)
+# has to be its own crate -- a `proc-macro = true` crate can't export
+# anything else alongside its proc-macros -- so this package's own
+# manifest doubles as the workspace root, mirroring tokio's own
+# `tokio`/`tokio-macros` split.
+[workspace]
+members = ["rusty_tokio-macros"]
+
 [dependencies]
+# See "Why a separate crate" in rusty_tokio-macros' own docs.
+rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/

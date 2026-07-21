@@ -84,6 +84,16 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-macos",
+ "rusty_tokio-macros",
+]
+
+[[package]]
+name = "rusty_tokio-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -39,6 +39,12 @@
 //!   within the calling task (no extra `spawn`) and resolve once every
 //!   one of them has, returning a tuple of their outputs; `try_join!` is
 //!   the `Result`-aware sibling, short-circuiting on the first `Err`.
+//! - [`macro@main`]/[`macro@test`]: attribute macros rewriting an
+//!   `async fn` into the `Runtime::new().unwrap().block_on(async { .. })`
+//!   boilerplate every example and test used to spell out by hand.
+//!   Defined in the separate `rusty_tokio-macros` proc-macro crate and
+//!   re-exported here -- see that crate's own docs for why it has to be
+//!   separate, and for the (small) scope this doesn't cover.
 //!
 //! # Deliberately out of scope (for now)
 //!
@@ -119,6 +125,7 @@ mod macros;
 mod runtime;
 
 pub use runtime::{Builder, Handle, Runtime};
+pub use rusty_tokio_macros::{main, test};
 pub use task::{JoinError, JoinHandle};
 
 use std::future::Future;
