@@ -5,7 +5,7 @@
 //! `platform`/`platform-linux`/`platform-macos` crates rather than
 //! reimplementing sockaddr packing and syscall error mapping a second
 //! time -- see the crate README's "Built on rustils" section for
-//! exactly which seam that is. It has five pieces, one module each:
+//! exactly which seam that is. It has six pieces, one module each:
 //!
 //! - [`task`]: a heap-allocated future plus an atomic state machine
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
@@ -128,6 +128,23 @@
 //!   `std::fs::File`'s `&mut self`-based API with this crate's
 //!   `AsyncRead`/`AsyncWrite`/`AsyncSeek` traits, and what happens to an
 //!   in-flight operation if its future is dropped before completing.
+//! - [`process`]: [`process::Command`], mirroring `std::process::
+//!   Command`'s builder API, but `spawn()`'s [`process::Child`] gives
+//!   async access to piped `stdin`/`stdout`/`stderr`
+//!   ([`process::ChildStdin`]/[`process::ChildStdout`]/
+//!   [`process::ChildStderr`]) and its `wait()` doesn't block a worker
+//!   thread. Built directly on `std::process`, not rustils -- rustils'
+//!   own process abstraction hands piped stdio back as an object-safe,
+//!   deliberately fd-hiding `File` trait (for Windows portability),
+//!   which can't be reactor-registered; `process`'s own module docs
+//!   have the full reasoning, the same call [`io::UnixDatagram`] already
+//!   made for an analogous reason. A piped child's stdio is a genuine
+//!   pipe (readiness-driven through the reactor, unlike `fs::File`'s
+//!   spawn_blocking-per-operation shape); `wait()` itself still runs on
+//!   [`spawn_blocking`], since neither `std::process::Child` nor
+//!   rustils exposes anything pollable for exit (a `pidfd` on Linux, or
+//!   `kevent`'s `EVFILT_PROC` on macOS, would each need their own
+//!   from-scratch reactor integration).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
@@ -233,6 +250,7 @@
 
 pub mod fs;
 pub mod io;
+pub mod process;
 pub mod sync;
 pub mod task;
 pub mod time;

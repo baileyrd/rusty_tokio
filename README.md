@@ -353,6 +353,38 @@ rustils' API can't support them yet.
   here, just a `set_nonblocking(true)` and reactor registration, the
   same bridge `TcpStream::from_std` already builds for adopting a `std`
   socket into this crate's reactor.
+- **Async child processes** (`process::Command`): mirrors
+  `std::process::Command`'s builder API (`arg`/`args`/`env`/`envs`/
+  `env_remove`/`env_clear`/`current_dir`/`stdin`/`stdout`/`stderr`,
+  same `&mut self -> &mut Self` chaining), but `spawn()`'s `Child` gives
+  async access to piped stdio and a `wait()` that doesn't block a
+  worker thread. Built directly on `std::process`, not rustils: rustils
+  does have a real `Command`/`Spawner`/`Child` abstraction, but its
+  piped stdio comes back as an object-safe `File` trait that
+  deliberately hides the underlying fd (for Windows portability, where
+  "raw fd" doesn't mean anything) -- incompatible with this crate's
+  actual need, since a child's piped stdin/stdout/stderr are plain
+  pipes and, unlike a regular file or a terminal, genuinely block on
+  read when empty and become readable when data arrives, exactly like a
+  socket. Rather than hand-rolling `fork`/`exec`/`posix_spawn` a second
+  time just to get raw fds back, this wraps `std::process::Command`/
+  `Child` directly -- the same call `io::UnixDatagram` already made for
+  the identical reason (rustils' abstraction not fitting this crate's
+  reactor-integration need, with `std` already having a complete, safe
+  implementation). `ChildStdin`/`ChildStdout`/`ChildStderr` are
+  reactor-registered the same way `TcpStream` is (non-blocking,
+  readiness-driven) -- a real difference from `fs::File`/stdio, which
+  can't be. `wait()` still runs the real, blocking
+  `std::process::Child::wait()` on the `spawn_blocking` pool rather
+  than a reactor-driven `pidfd`/`EVFILT_PROC` -- not a polling loop
+  (nothing re-checks on a timer), a genuine blocking wait that wakes
+  immediately and exactly when the child exits, just parked on a
+  dedicated OS thread instead of a reactor-registered fd. A pidfd
+  (Linux 5.3+) or kqueue's `EVFILT_PROC`/`NOTE_EXIT` (macOS) would each
+  need their own from-scratch reactor integration and their own
+  real-hardware verification -- a deliberate simplicity trade-off, not
+  a placeholder, consistent with `fs::File`/stdio already choosing this
+  same shape for operations a reactor can't drive directly.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single

@@ -481,3 +481,27 @@ pub(crate) fn set_recv_buffer_size(fd: RawFd, size: u32) -> io::Result<()> {
 pub(crate) fn recv_buffer_size(fd: RawFd) -> io::Result<u32> {
     Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF)? as u32)
 }
+
+/// Flips `fd`'s `O_NONBLOCK` flag via `fcntl(2)` -- unlike every socket
+/// type in this module (each has its own concrete `set_nonblocking`,
+/// either from rustils or, on macOS at creation time, hand-rolled), a
+/// plain pipe fd (a child process's piped stdin/stdout/stderr, adopted
+/// from `std::process::Child`) has no such method of its own. `read(2)`/
+/// `write(2)` on a pipe behave exactly like a socket's once non-blocking
+/// -- `EWOULDBLOCK` when there's nothing to read or no room to write --
+/// so [`read`]/[`write`] above and [`super::reactor::poll_io`]'s retry
+/// loop work unmodified on one.
+pub(crate) fn set_nonblocking(fd: RawFd, nonblocking: bool) -> io::Result<()> {
+    // SAFETY: `fd` is caller-owned and open; `F_GETFL` takes no further
+    // argument.
+    let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
+    let flags = if nonblocking {
+        flags | libc::O_NONBLOCK
+    } else {
+        flags & !libc::O_NONBLOCK
+    };
+    // SAFETY: `fd` is caller-owned and open; `flags` is a valid
+    // `O_NONBLOCK`-adjusted copy of what `F_GETFL` just returned.
+    cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) })?;
+    Ok(())
+}
