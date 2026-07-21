@@ -10,21 +10,23 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // `PlatformTcpListener`/`PlatformTcpStream` are the only OS-specific
-// names in this file: on Linux, rustils' concrete types (bind/accept/
-// addressing/`set_nodelay` all come from there -- see `socket/mod.rs`'s
-// docs for what's still hand-rolled even on Linux); on macOS/BSD (no
-// rustils backend to build on), this crate's own hand-rolled
-// `socket::macos` shim types, shaped to match. Everything below this
+// names in this file: rustils' concrete types cover bind/accept/
+// addressing/`set_nodelay` on both backends it has (`platform_linux` on
+// Linux, `platform_macos` on macOS -- see `socket/mod.rs`'s docs for
+// what stays hand-rolled on top of either one). Everything below this
 // point is identical logic regardless of which one it is.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use platform::net::{TcpListener as _, TcpStream as _};
+
 #[cfg(target_os = "linux")]
 use platform_linux::{
     LinuxTcpListener as PlatformTcpListener, LinuxTcpStream as PlatformTcpStream,
 };
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use super::socket::{MacosTcpListener as PlatformTcpListener, MacosTcpStream as PlatformTcpStream};
+#[cfg(target_os = "macos")]
+use platform_macos::{
+    MacosTcpListener as PlatformTcpListener, MacosTcpStream as PlatformTcpStream,
+};
 
 /// A non-blocking, epoll-driven TCP listener.
 pub struct TcpListener {

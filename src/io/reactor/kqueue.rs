@@ -1,4 +1,4 @@
-//! The macOS/BSD backend: `kevent` plus a software `EVFILT_USER` event
+//! The macOS backend: `kevent` plus a software `EVFILT_USER` event
 //! (rather than a separate wake fd like Linux's `eventfd` -- kqueue has
 //! a built-in way to do this without one) to wake it early for
 //! registration/shutdown.
@@ -8,7 +8,10 @@
 //! x86_64-apple-darwin` (real macOS `libc` bindings, real type-checking)
 //! but has never actually been linked or run on macOS. Treat it as
 //! reviewed-but-unverified until someone runs the test suite on real
-//! hardware.
+//! hardware -- unlike `socket/mod.rs`'s macOS half, which now builds on
+//! rustils' `platform-macos` and inherits that crate's own real
+//! `macos-latest` CI (see rustils#48/#52/#53); this reactor is this
+//! crate's own code with no such upstream coverage.
 
 use super::{Interest, ScheduledIo};
 use std::collections::HashMap;

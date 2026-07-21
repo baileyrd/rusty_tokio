@@ -2,10 +2,10 @@
 //! `std` (no `mio`, no `tokio`, no `crossbeam`). The scheduler, reactor,
 //! timers, and sync primitives are all original code; socket setup in
 //! [`io`] builds on [`rustils`](https://github.com/baileyrd/rustils)'
-//! `platform`/`platform-linux` crates rather than reimplementing
-//! sockaddr packing and syscall error mapping a second time -- see the
-//! crate README's "Built on rustils" section for exactly which seam
-//! that is. It has four pieces, one module each:
+//! `platform`/`platform-linux`/`platform-macos` crates rather than
+//! reimplementing sockaddr packing and syscall error mapping a second
+//! time -- see the crate README's "Built on rustils" section for
+//! exactly which seam that is. It has four pieces, one module each:
 //!
 //! - [`task`]: a heap-allocated future plus an atomic state machine
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
@@ -14,7 +14,7 @@
 //! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
 //!   with its own run queue, backed by a shared injector queue and
 //!   able to steal from one another.
-//! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS/BSD) plus
+//! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket`, and an
 //!   `AsyncRead`/`AsyncWrite` trait pair for generic code (`copy`,
 //!   codecs, adapters).
@@ -29,17 +29,24 @@
 //! This is a real, working runtime, not a toy -- but it's also honest
 //! about its edges rather than papering over them:
 //!
-//! - **Linux and macOS/BSD, not Windows.** The reactor has two backends
-//!   behind the same `ScheduledIo` interface -- `epoll`+`eventfd` on
-//!   Linux, `kevent`+`EVFILT_USER` on macOS/BSD -- with a matching
-//!   hand-rolled socket layer on macOS/BSD (`rustils` has no backend
-//!   there to build on the way Linux does). A Windows (IOCP) backend
-//!   would need a third, doable but not done. **The macOS/BSD path is
-//!   compile-checked (`cargo check --target x86_64-apple-darwin`,
-//!   with real macOS `libc` bindings) but has never been run on real
-//!   hardware** -- this crate has only ever been developed and tested
-//!   on Linux. Treat it as reviewed-but-unverified until someone runs
-//!   the test suite on an actual Mac.
+//! - **Linux and macOS, not Windows or generic BSD.** The reactor has
+//!   two backends behind the same `ScheduledIo` interface --
+//!   `epoll`+`eventfd` on Linux, `kevent`+`EVFILT_USER` on macOS -- with
+//!   socket setup on macOS now coming from rustils' `platform-macos`
+//!   crate (added in response to rustils#48, filed from this crate's
+//!   own experience hand-rolling that layer the first time; the old
+//!   hand-rolled shim is gone). A Windows (IOCP) backend would need a
+//!   third, doable but not done. **This crate's own integration on top
+//!   of the macOS backend -- the kqueue reactor, `TcpStream`/
+//!   `TcpListener`/`UdpSocket` wrapping `platform-macos`'s types -- is
+//!   still compile-checked only (`cargo check --target
+//!   x86_64-apple-darwin`), never run on real hardware**, even though
+//!   `platform-macos` itself now has real `macos-latest` CI upstream
+//!   (which already caught a genuine `AF_UNIX` bug the cross-check
+//!   alone couldn't). This crate has only ever been developed and
+//!   tested on Linux -- treat the macOS reactor path as
+//!   reviewed-but-unverified until someone runs *this* crate's test
+//!   suite on an actual Mac, not just rustils'.
 //! - **`AsyncRead`/`AsyncWrite` are this crate's own trait definitions,
 //!   not tokio's or `futures-io`'s.** Shaped the same way (`Pin<&mut
 //!   Self>`, `poll_*` methods) so generic code here works the same way,

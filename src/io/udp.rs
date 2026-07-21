@@ -6,16 +6,17 @@ use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-// See `tcp.rs`'s equivalent comment: rustils' concrete type on Linux,
-// this crate's own hand-rolled shim on macOS/BSD, identical logic below
-// either way.
-#[cfg(target_os = "linux")]
+// See `tcp.rs`'s equivalent comment: rustils' concrete type either way
+// (`platform_linux` on Linux, `platform_macos` on macOS), identical
+// logic below regardless of which.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use platform::net::UdpSocket as _;
+
 #[cfg(target_os = "linux")]
 use platform_linux::LinuxUdpSocket as PlatformUdpSocket;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use super::socket::MacosUdpSocket as PlatformUdpSocket;
+#[cfg(target_os = "macos")]
+use platform_macos::MacosUdpSocket as PlatformUdpSocket;
 
 /// A non-blocking, epoll-driven UDP socket. `bind`/`send_to`/
 /// `recv_from`/`local_addr` never block on their own (only readiness
