@@ -1,12 +1,38 @@
-//! Raw, non-blocking socket syscalls. Every socket this runtime hands
-//! out is created here with `SOCK_NONBLOCK` from birth -- there is no
-//! "make it non-blocking after the fact" step, which sidesteps a whole
-//! class of races where a caller forgets to flip that switch.
+//! The sliver of raw-`libc` socket code this crate still needs after
+//! swapping onto `rustils`' `platform`/`platform-linux` crates
+//! (rustils#41 / PR baileyrd/rustils#42) for socket lifecycle,
+//! addressing, and UDP.
+//!
+//! `rustils`' concrete Linux socket types cover bind/listen/accept,
+//! `set_nonblocking`, `set_nodelay`, `local_addr`/`peer_addr`, and the
+//! whole UDP send/recv path -- see `tcp.rs`/`udp.rs`, which use those
+//! directly. Two things are deliberately still hand-rolled here instead:
+//!
+//! - **Non-blocking `connect`.** `LinuxTcpStream::connect` creates a
+//!   *blocking* socket and calls a blocking `connect(2)` internally --
+//!   correct for rustils' own blocking-I/O consumers, but exactly wrong
+//!   for an async runtime: it would stall a whole worker thread for the
+//!   connection's RTT. An async connect needs the socket to already be
+//!   non-blocking *before* `connect(2)` is called, so it returns
+//!   `EINPROGRESS` immediately and the reactor waits for writability
+//!   instead. Nothing in rustils' public surface exposes "create a bare
+//!   socket, don't connect yet", so that one syscall pair (`socket` +
+//!   `connect`) stays here; the resulting fd is then adopted into a
+//!   `LinuxTcpStream` via `From<OwnedFd>` for everything after.
+//! - **`read`/`write`.** `platform::net::TcpStream::read`/`write` take
+//!   `&mut self` (a reasonable choice for rustils' own blocking callers,
+//!   who never need to read and write concurrently from two tasks
+//!   sharing one stream) -- but this runtime's `TcpStream` deliberately
+//!   exposes `&self` methods so one task can read while another writes.
+//!   Bypassing the trait for the two syscalls that are trivial anyway
+//!   (a raw `read`/`write` on an fd we already have via `AsRawFd`) keeps
+//!   that API intact instead of hiding a mutex behind it.
 
 use libc::{c_int, sockaddr, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t};
+use platform::error::{OsCode, PlatformError};
 use std::io;
 use std::mem;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 fn cvt(ret: c_int) -> io::Result<c_int> {
@@ -27,8 +53,7 @@ fn domain_for(addr: SocketAddr) -> c_int {
 fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
     // SAFETY: an all-zero `sockaddr_storage` is a valid (if inert)
     // value for this plain-old-data type; only the variant selected by
-    // `ss_family` (written below) is ever read back by the kernel or by
-    // `from_sockaddr`.
+    // `ss_family` (written below) is ever read back by the kernel.
     let mut storage: sockaddr_storage = unsafe { mem::zeroed() };
     let len = match addr {
         SocketAddr::V4(v4) => {
@@ -76,38 +101,24 @@ fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
     (storage, len as socklen_t)
 }
 
-fn from_sockaddr(storage: &sockaddr_storage) -> io::Result<SocketAddr> {
-    match storage.ss_family as c_int {
-        libc::AF_INET => {
-            // SAFETY: `ss_family == AF_INET` means the kernel filled this
-            // buffer as a `sockaddr_in`, which fits within
-            // `sockaddr_storage`; reading it back that way mirrors what
-            // `to_sockaddr` wrote.
-            let sin = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in>() };
-            let ip = Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes());
-            Ok(SocketAddr::V4(SocketAddrV4::new(
-                ip,
-                u16::from_be(sin.sin_port),
-            )))
-        }
-        libc::AF_INET6 => {
-            // SAFETY: see the V4 arm above, for `sockaddr_in6`.
-            let sin6 = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in6>() };
-            let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            Ok(SocketAddr::V6(SocketAddrV6::new(
-                ip,
-                u16::from_be(sin6.sin6_port),
-                sin6.sin6_flowinfo,
-                sin6.sin6_scope_id,
-            )))
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unrecognized address family",
-        )),
+/// Adapts `rustils`' two-axis `PlatformError` to `std::io::Error` so it
+/// composes with the rest of this crate's (and every caller's) plain
+/// `io::Result`-based API. On the Linux backend this is effectively
+/// always the `Errno` arm, which round-trips through std's own errno
+/// mapping -- so e.g. `EAGAIN` still comes back as
+/// `io::ErrorKind::WouldBlock`, exactly what `reactor::ready_io`'s retry
+/// loop checks for.
+pub(crate) fn from_platform_err(e: PlatformError) -> io::Error {
+    if let OsCode::Errno(errno) = e.os {
+        return io::Error::from_raw_os_error(errno);
     }
+    io::Error::other(e)
 }
 
+/// A bare, non-blocking socket -- not yet bound or connected. Nothing in
+/// rustils' public surface creates a socket without also connecting
+/// (blocking) or binding it, so this one syscall stays hand-rolled; see
+/// this module's docs.
 pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
     // SAFETY: plain integer arguments, no memory referenced.
     let fd = unsafe {
@@ -123,57 +134,6 @@ pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-pub(crate) fn new_udp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
-    // SAFETY: see `new_tcp_socket`.
-    let fd = unsafe {
-        libc::socket(
-            domain_for(addr),
-            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            0,
-        )
-    };
-    cvt(fd)?;
-    // SAFETY: see `new_tcp_socket`.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-pub(crate) fn set_reuseaddr(fd: RawFd) -> io::Result<()> {
-    let value: c_int = 1;
-    // SAFETY: `&value` is a valid `c_int`-sized buffer outliving the
-    // call; `fd` is caller-owned and still open.
-    cvt(unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            (&value as *const c_int).cast(),
-            mem::size_of::<c_int>() as socklen_t,
-        )
-    })?;
-    Ok(())
-}
-
-pub(crate) fn bind(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
-    let (storage, len) = to_sockaddr(addr);
-    // SAFETY: `storage` holds a valid sockaddr for exactly `len` bytes
-    // (`to_sockaddr`'s contract); `fd` is a valid, freshly created
-    // socket.
-    cvt(unsafe {
-        libc::bind(
-            fd,
-            (&storage as *const sockaddr_storage).cast::<sockaddr>(),
-            len,
-        )
-    })?;
-    Ok(())
-}
-
-pub(crate) fn listen(fd: RawFd, backlog: c_int) -> io::Result<()> {
-    // SAFETY: `fd` is a valid, bound socket.
-    cvt(unsafe { libc::listen(fd, backlog) })?;
-    Ok(())
-}
-
 /// `connect(2)` on a non-blocking socket returns `EINPROGRESS`
 /// immediately rather than blocking -- that is success from this
 /// function's point of view; the caller waits for the socket to become
@@ -181,7 +141,9 @@ pub(crate) fn listen(fd: RawFd, backlog: c_int) -> io::Result<()> {
 /// connection actually succeeded.
 pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
     let (storage, len) = to_sockaddr(addr);
-    // SAFETY: see `bind`.
+    // SAFETY: `storage` holds a valid sockaddr for exactly `len` bytes
+    // (`to_sockaddr`'s contract); `fd` is a valid, freshly created,
+    // still-unconnected socket.
     let r = unsafe {
         libc::connect(
             fd,
@@ -201,7 +163,9 @@ pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
 
 /// `getsockopt(SOL_SOCKET, SO_ERROR)` -- the standard way to learn
 /// whether a non-blocking `connect` that just became writable actually
-/// succeeded, or failed asynchronously (e.g. connection refused).
+/// succeeded, or failed asynchronously (e.g. connection refused). Not
+/// exposed by rustils, which never needs it (its own `connect` is
+/// synchronous and reports failure directly).
 pub(crate) fn take_socket_error(fd: RawFd) -> io::Result<()> {
     let mut err: c_int = 0;
     let mut len = mem::size_of::<c_int>() as socklen_t;
@@ -221,73 +185,6 @@ pub(crate) fn take_socket_error(fd: RawFd) -> io::Result<()> {
     } else {
         Err(io::Error::from_raw_os_error(err))
     }
-}
-
-pub(crate) fn accept(fd: RawFd) -> io::Result<(OwnedFd, SocketAddr)> {
-    // SAFETY: `storage`/`len` are valid, exclusively borrowed out-params
-    // the kernel fills; `fd` is a valid, listening socket.
-    let (newfd, storage) = unsafe {
-        let mut storage: sockaddr_storage = mem::zeroed();
-        let mut len = mem::size_of::<sockaddr_storage>() as socklen_t;
-        let newfd = libc::accept4(
-            fd,
-            (&mut storage as *mut sockaddr_storage).cast::<sockaddr>(),
-            &mut len,
-            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-        );
-        (newfd, storage)
-    };
-    cvt(newfd)?;
-    // SAFETY: `newfd` was just returned by `accept4(2)` and is valid,
-    // otherwise-unowned, and wrapped exactly once.
-    let owned = unsafe { OwnedFd::from_raw_fd(newfd) };
-    let peer = from_sockaddr(&storage)?;
-    Ok((owned, peer))
-}
-
-pub(crate) fn local_addr(fd: RawFd) -> io::Result<SocketAddr> {
-    // SAFETY: see `accept`.
-    let storage = unsafe {
-        let mut storage: sockaddr_storage = mem::zeroed();
-        let mut len = mem::size_of::<sockaddr_storage>() as socklen_t;
-        cvt(libc::getsockname(
-            fd,
-            (&mut storage as *mut sockaddr_storage).cast::<sockaddr>(),
-            &mut len,
-        ))?;
-        storage
-    };
-    from_sockaddr(&storage)
-}
-
-pub(crate) fn peer_addr(fd: RawFd) -> io::Result<SocketAddr> {
-    // SAFETY: see `accept`.
-    let storage = unsafe {
-        let mut storage: sockaddr_storage = mem::zeroed();
-        let mut len = mem::size_of::<sockaddr_storage>() as socklen_t;
-        cvt(libc::getpeername(
-            fd,
-            (&mut storage as *mut sockaddr_storage).cast::<sockaddr>(),
-            &mut len,
-        ))?;
-        storage
-    };
-    from_sockaddr(&storage)
-}
-
-pub(crate) fn set_nodelay(fd: RawFd, nodelay: bool) -> io::Result<()> {
-    let value: c_int = nodelay as c_int;
-    // SAFETY: see `set_reuseaddr`.
-    cvt(unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            (&value as *const c_int).cast(),
-            mem::size_of::<c_int>() as socklen_t,
-        )
-    })?;
-    Ok(())
 }
 
 pub(crate) fn read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
@@ -310,49 +207,4 @@ pub(crate) fn write(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     } else {
         Ok(n as usize)
     }
-}
-
-pub(crate) fn send_to(fd: RawFd, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
-    let (storage, len) = to_sockaddr(addr);
-    // SAFETY: `buf` is valid for `buf.len()` bytes; `storage` holds a
-    // valid sockaddr for exactly `len` bytes; `fd` is caller-owned.
-    let n = unsafe {
-        libc::sendto(
-            fd,
-            buf.as_ptr().cast(),
-            buf.len(),
-            0,
-            (&storage as *const sockaddr_storage).cast::<sockaddr>(),
-            len,
-        )
-    };
-    if n < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(n as usize)
-    }
-}
-
-pub(crate) fn recv_from(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-    // SAFETY: `storage`/`len` are valid, exclusively borrowed out-params
-    // the kernel fills; `buf` is valid for `buf.len()` bytes; `fd` is
-    // caller-owned.
-    let (n, storage) = unsafe {
-        let mut storage: sockaddr_storage = mem::zeroed();
-        let mut len = mem::size_of::<sockaddr_storage>() as socklen_t;
-        let n = libc::recvfrom(
-            fd,
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            0,
-            (&mut storage as *mut sockaddr_storage).cast::<sockaddr>(),
-            &mut len,
-        );
-        (n, storage)
-    };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let peer = from_sockaddr(&storage)?;
-    Ok((n as usize, peer))
 }

@@ -1,6 +1,11 @@
 //! `rusty_tokio` -- a hand-rolled async runtime, built from scratch on
-//! top of nothing but `std` and raw `libc` syscalls (no `mio`, no
-//! `tokio`, no `crossbeam`). It has four pieces, one module each:
+//! `std` (no `mio`, no `tokio`, no `crossbeam`). The scheduler, reactor,
+//! timers, and sync primitives are all original code; socket setup in
+//! [`io`] builds on [`rustils`](https://github.com/baileyrd/rustils)'
+//! `platform`/`platform-linux` crates rather than reimplementing
+//! sockaddr packing and syscall error mapping a second time -- see the
+//! crate README's "Built on rustils" section for exactly which seam
+//! that is. It has four pieces, one module each:
 //!
 //! - [`task`]: a heap-allocated future plus an atomic state machine
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
