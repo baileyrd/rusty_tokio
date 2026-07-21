@@ -125,7 +125,12 @@ rustils' API can't support them yet.
   design as the bounded channel (see `mpsc`'s module docs for the real
   lost-wakeup bug that shape avoids), just without a capacity check or
   anywhere for a sender to wait, so `UnboundedSender::send` is a plain
-  synchronous method, not `async fn`.
+  synchronous method, not `async fn`. Also `RwLock`: many concurrent
+  readers or one exclusive writer, write-preferring like tokio's own
+  (once a writer is queued, later readers queue behind it too, rather
+  than jumping ahead just because the write lock itself isn't held
+  yet -- otherwise constant read traffic could starve a waiting writer
+  indefinitely).
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker
