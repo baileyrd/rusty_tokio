@@ -5,7 +5,7 @@
 //! `platform`/`platform-linux`/`platform-macos` crates rather than
 //! reimplementing sockaddr packing and syscall error mapping a second
 //! time -- see the crate README's "Built on rustils" section for
-//! exactly which seam that is. It has four pieces, one module each:
+//! exactly which seam that is. It has five pieces, one module each:
 //!
 //! - [`task`]: a heap-allocated future plus an atomic state machine
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
@@ -82,7 +82,21 @@
 //!   `into_std` too, for adopting an already-created `std` socket (from
 //!   a supervisor process, a `socket2`-configured option this crate has
 //!   no wrapper for, ...) or handing one back out as a plain blocking
-//!   socket.
+//!   socket. Also [`io::AsyncSeek`], seeking within a stream -- only
+//!   meaningful for a file, not a socket, so nothing in this module
+//!   implements it; [`fs::File`] (below) does.
+//! - [`fs`]: [`fs::File`], the only type here so far. A regular file
+//!   can't be registered with a reactor's readiness model the way a
+//!   socket can -- the kernel considers it always "ready", and the real
+//!   latency happens synchronously inside the `read`/`write`/`lseek`
+//!   syscall itself -- so unlike `io::TcpStream`, `File` is entirely a
+//!   [`spawn_blocking`] abstraction: every operation (including
+//!   `open`/`create` themselves) moves the underlying `std::fs::File`
+//!   onto a blocking-pool thread and hands it back once the syscall
+//!   returns. See `fs`'s own module docs for how that reconciles
+//!   `std::fs::File`'s `&mut self`-based API with this crate's
+//!   `AsyncRead`/`AsyncWrite`/`AsyncSeek` traits, and what happens to an
+//!   in-flight operation if its future is dropped before completing.
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
@@ -177,6 +191,7 @@
 //!   second macro that does the same thing would be redundant, not a
 //!   real gap.
 
+pub mod fs;
 pub mod io;
 pub mod sync;
 pub mod task;

@@ -28,8 +28,8 @@ mod udp;
 mod unix;
 
 pub use async_io::{
-    copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite,
-    AsyncWriteExt, ReadBuf,
+    copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
+    AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf,
 };
 pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]

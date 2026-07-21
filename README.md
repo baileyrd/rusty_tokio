@@ -247,6 +247,17 @@ rustils' API can't support them yet.
   `Arc<Reactor>` fields' reference counts -- not worth the added unsafe
   code for how rarely this is called.
 
+  Also `AsyncSeek` (`poll_seek(pos) -> Poll<io::Result<u64>>`), seeking
+  within a stream -- meaningful for a file, not a socket, so nothing in
+  this module implements it; `fs::File` (below) does. A single combined
+  method rather than tokio's own two-phase `start_seek`/`poll_complete`
+  split: that split exists so a caller can poll something else while a
+  seek is pending, which only matters for an implementation that
+  interleaves seeking with other buffered state the way tokio's own file
+  type does -- `fs::File` already funnels every operation through one
+  shared in-flight-blocking-call state machine, so there's nothing else
+  meaningful to poll in between.
+
   **This crate's macOS integration has never run on real hardware.**
   It's developed and tested on Linux only; the kqueue reactor and the
   `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of rustils'
@@ -258,6 +269,26 @@ rustils' API can't support them yet.
   solid, but this crate's own reactor integration on top of it is still
   reviewed-but-unverified until someone actually runs *this* crate's
   `cargo test` on a Mac.
+- **Async filesystem I/O** (`fs::File`): a regular file can't be
+  registered with `epoll`/`kevent`'s readiness model the way a socket
+  can -- the kernel considers it always "ready", and the actual disk
+  latency happens synchronously inside the `read`/`write`/`lseek`
+  syscall itself. So unlike `TcpStream`, `File` is entirely a
+  `spawn_blocking` abstraction: every operation -- including `open`/
+  `create` themselves, since opening a file can block too (a network
+  filesystem mount, say) -- moves the underlying `std::fs::File` onto a
+  blocking-pool thread, runs the real syscall there, and hands the file
+  back once it's done. Implements `AsyncRead`/`AsyncWrite`/`AsyncSeek`
+  with `&mut self`-exclusive access at every `poll_*` call (unlike
+  `TcpStream`'s `&self`-based split: a file has one cursor, so genuinely
+  concurrent reads and writes make no sense the way full-duplex socket
+  I/O does). Every operation shares one internal state machine -- if the
+  future for one gets dropped before completing (a `select!`/timeout
+  cancelling a read, say), the blocking closure it already dispatched
+  keeps running in the background regardless (the same
+  already-abandoned-`spawn_blocking`-call behavior every other blocking
+  op has), and the *next* operation on that `File` drains the leftover
+  result (discarding it if it doesn't match) before starting its own.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
