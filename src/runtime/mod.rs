@@ -1,11 +1,24 @@
-//! The multi-threaded, work-stealing runtime: a fixed pool of worker
-//! threads, each with its own local run queue, backed by a shared
-//! injector queue (for tasks spawned from outside the pool) and able to
-//! steal from one another when idle. Plus the I/O reactor and timer
-//! driver threads that feed wakeups back in.
+//! Two runtime flavors sharing one `Shared`/scheduling core:
+//!
+//! - **Multi-threaded** (the default, [`Builder::new`]/
+//!   [`Builder::new_multi_thread`]): a fixed pool of worker threads,
+//!   each with its own local run queue, backed by a shared injector
+//!   queue (for tasks spawned from outside the pool) and able to steal
+//!   from one another when idle.
+//! - **Current-thread** ([`Builder::new_current_thread`]): no worker
+//!   threads at all -- spawned tasks run interleaved with polls of
+//!   `block_on`'s own future, entirely on whichever thread calls it. See
+//!   `current_thread`'s module docs for the scheduling loop and what
+//!   this flavor deliberately still doesn't do (drive I/O inline on
+//!   that same thread, or accept `!Send` futures -- see issue #23's
+//!   `LocalSet`/`spawn_local`).
+//!
+//! Both flavors share the same I/O reactor and timer driver background
+//! threads that feed wakeups back in.
 
 mod blocking;
 mod context;
+mod current_thread;
 mod worker;
 
 pub use context::Handle;
@@ -182,8 +195,15 @@ impl Shared {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flavor {
+    MultiThread,
+    CurrentThread,
+}
+
 /// Configures and builds a [`Runtime`].
 pub struct Builder {
+    flavor: Flavor,
     worker_threads: usize,
     max_blocking_threads: usize,
 }
@@ -191,6 +211,7 @@ pub struct Builder {
 impl Builder {
     pub fn new() -> Self {
         Builder {
+            flavor: Flavor::MultiThread,
             worker_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
@@ -198,8 +219,42 @@ impl Builder {
         }
     }
 
+    /// Equivalent to [`Builder::new`] -- the multi-threaded,
+    /// work-stealing pool. Exists so callers who want to be explicit
+    /// about the flavor (to pair with [`Builder::new_current_thread`])
+    /// don't have to reach for a bare `new`.
+    pub fn new_multi_thread() -> Self {
+        Self::new()
+    }
+
+    /// A runtime with no worker-thread pool at all: spawned tasks run
+    /// interleaved with polls of `block_on`'s own future, entirely on
+    /// whichever thread calls it -- see `current_thread`'s module docs
+    /// for the scheduling loop. Spawned futures still need to be `Send`
+    /// (the same as the multi-threaded flavor); this alone doesn't
+    /// enable `!Send` futures -- that needs a `LocalSet`, filed
+    /// separately as issue #23.
+    pub fn new_current_thread() -> Self {
+        Builder {
+            flavor: Flavor::CurrentThread,
+            worker_threads: 1,
+            max_blocking_threads: 32,
+        }
+    }
+
+    /// Only meaningful for the multi-threaded flavor -- see
+    /// [`Builder::new_current_thread`].
+    ///
+    /// # Panics
+    /// Panics if `n` is zero, or if called on a current-thread builder
+    /// (where it has nothing to configure).
     pub fn worker_threads(mut self, n: usize) -> Self {
         assert!(n > 0, "a runtime needs at least one worker thread");
+        assert!(
+            self.flavor == Flavor::MultiThread,
+            "worker_threads has no effect on a runtime built with \
+             Builder::new_current_thread()"
+        );
         self.worker_threads = n;
         self
     }
@@ -221,7 +276,18 @@ impl Builder {
         timer.start();
         let blocking_pool = BlockingPool::new(self.max_blocking_threads);
 
-        let local_queues = (0..self.worker_threads)
+        let is_current_thread = self.flavor == Flavor::CurrentThread;
+        // A current-thread runtime has exactly one local queue -- the
+        // calling thread's, registered as "worker 0" for the duration
+        // of each `block_on` call (see `current_thread::block_on`) --
+        // and nothing to steal from or share with, so no OS threads are
+        // spawned for it at all.
+        let queue_count = if is_current_thread {
+            1
+        } else {
+            self.worker_threads
+        };
+        let local_queues = (0..queue_count)
             .map(|_| Mutex::new(std::collections::VecDeque::new()))
             .collect();
 
@@ -242,13 +308,20 @@ impl Builder {
             blocking_pool,
         });
 
-        let workers = (0..self.worker_threads)
-            .map(|idx| worker::spawn_worker(shared.clone(), idx))
-            .collect();
+        let workers = if is_current_thread {
+            None
+        } else {
+            Some(
+                (0..self.worker_threads)
+                    .map(|idx| worker::spawn_worker(shared.clone(), idx))
+                    .collect(),
+            )
+        };
 
         Ok(Runtime {
             shared,
-            workers: Some(workers),
+            workers,
+            is_current_thread,
         })
     }
 }
@@ -265,6 +338,7 @@ impl Default for Builder {
 pub struct Runtime {
     shared: Arc<Shared>,
     workers: Option<Vec<std::thread::JoinHandle<()>>>,
+    is_current_thread: bool,
 }
 
 impl Runtime {
@@ -305,11 +379,21 @@ impl Runtime {
     }
 
     /// Drive `future` to completion on the calling thread, parking it
-    /// (not busy-spinning) whenever it's `Pending`. Anything `future`
-    /// spawns runs on the worker pool as usual.
+    /// (not busy-spinning) whenever it's `Pending`.
+    ///
+    /// On the multi-threaded flavor, anything `future` spawns runs on
+    /// the worker pool as usual, in the background. On the
+    /// current-thread flavor (see [`Builder::new_current_thread`]),
+    /// there is no worker pool -- spawned tasks run interleaved with
+    /// polls of `future` itself, entirely on this call's own thread; see
+    /// `current_thread`'s module docs.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = context::enter(self.shared.clone());
-        block_on_inner(future)
+        if self.is_current_thread {
+            current_thread::block_on(&self.shared, future)
+        } else {
+            block_on_inner(future)
+        }
     }
 
     /// The four steps every shutdown path ends with: flip the hard
