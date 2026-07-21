@@ -148,6 +148,26 @@ rustils' API can't support them yet.
   `active_tasks` counter that already existed (added for graceful
   shutdown, above); not the kind of hot-path cost that justifies
   withholding it by default.
+- **Cooperative scheduling budget**: `Task::run` only calls a future's
+  `poll` once per scheduling turn, but nothing stops that one call from
+  itself looping internally forever -- a `Stream`-like future that keeps
+  handing back `Ready`, or a tight `while let Some(x) = rx.recv().await
+  { .. }` loop over a channel that's always ready, both look completely
+  ordinary from inside that one task (every individual `.await` really
+  is resolving) while quietly starving every other task on the same
+  worker. Every task now gets a fixed budget of poll operations (128,
+  matching tokio's own default -- not load-bearing on its own, just
+  already well-exercised), reset at the top of each top-level poll and
+  spent by this crate's own poll-heavy primitives: the reactor's
+  `poll_io` (covering every socket read/write through one shared choke
+  point) and `mpsc`/`oneshot`/`Notify`'s own poll implementations. Once
+  exhausted, a self-wake (the same idiom `task::yield_now` already uses)
+  forces a `Pending` return *before* the caller's own readiness check or
+  dequeue -- so a channel that already has a value sitting in it still
+  yields once budget runs out, deferring the read to the next poll
+  instead of handing it over immediately, which is what actually breaks
+  the starvation case above. A future polled outside of `Task::run` (an
+  outer `block_on` future, most notably) has no budget in scope at all.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
   `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
   backends behind the same interface

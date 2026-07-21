@@ -79,6 +79,9 @@ impl<T> Future for Receiver<T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
         let mut guard = self.shared.state.lock().unwrap();
         match &*guard {
             State::Value(_) => {

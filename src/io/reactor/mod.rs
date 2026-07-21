@@ -126,6 +126,13 @@ pub(crate) fn poll_io<T>(
     cx: &mut Context<'_>,
     mut op: impl FnMut() -> io::Result<T>,
 ) -> Poll<io::Result<T>> {
+    // Coop budget check first, before even looking at readiness -- see
+    // `crate::coop`'s module docs for why a socket that's already
+    // readable still needs to yield once budget runs out, rather than
+    // handing the read/write straight over.
+    if crate::coop::poll_proceed(cx).is_pending() {
+        return Poll::Pending;
+    }
     loop {
         if io.poll_ready(cx, interest).is_pending() {
             return Poll::Pending;

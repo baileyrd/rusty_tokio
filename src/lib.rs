@@ -50,7 +50,17 @@
 //!   thread count, so answering "how busy is this worker" or "is the
 //!   pool starved" no longer means inferring it indirectly through
 //!   wall-clock timing of the public API the way `benches/scheduler.rs`/
-//!   `benches/timers.rs` (issues #8/#13) had to.
+//!   `benches/timers.rs` (issues #8/#13) had to. Every task also gets a
+//!   cooperative scheduling budget, reset at the top of each poll turn
+//!   and spent by this crate's own reactor and channel poll points --
+//!   without it, a task whose one `poll` call loops internally forever
+//!   (a tight `while let Some(x) = rx.recv().await { .. }` over a
+//!   channel that's always ready, say) can starve every other task on
+//!   its worker indefinitely, since nothing about any individual
+//!   `.await` in that loop looks like a bug from inside that one task.
+//!   See `coop`'s (crate-private) module docs for exactly which
+//!   operations are charged and why the budget check has to run
+//!   *before* an operation's own readiness check, not after.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
 //!   `UnixStream` / `UnixListener`, an `AsyncRead`/`AsyncWrite` trait
@@ -167,6 +177,7 @@ pub mod sync;
 pub mod task;
 pub mod time;
 
+mod coop;
 mod macros;
 mod runtime;
 

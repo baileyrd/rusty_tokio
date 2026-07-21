@@ -116,7 +116,9 @@ impl Task {
                 id: self.id,
                 name: self.name.clone(),
             });
-            panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)))
+            crate::coop::budget(|| {
+                panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)))
+            })
         };
 
         match poll_result {

@@ -100,6 +100,9 @@ impl Future for Notified<'_> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if crate::coop::poll_proceed(cx).is_pending() {
+            return Poll::Pending;
+        }
         // Checked first, before ever touching the shared lock: this is
         // what makes re-polling after a `notify_waiters`-driven wake
         // resolve instead of registering (uselessly, since it's already
