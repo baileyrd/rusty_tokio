@@ -25,6 +25,21 @@ libc = "0.2"
 # crate instance (mixing revs would make e.g. `platform::error::
 # PlatformError` from one checkout a different type than from another).
 platform = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+# The scheduler's per-worker local run queues and cross-worker stealing
+# (`runtime::Shared`) -- issue #8's lock-free swap. Not hand-rolled: a
+# Chase-Lev deque is real unsafe concurrent code, and this project has
+# no `loom`-based verification set up to trust a new implementation of
+# it the way the ordinary multi-threaded integration tests already
+# caught real lost-wakeup bugs elsewhere in this crate. `crossbeam-deque`
+# is exactly what tokio itself uses for this, and every consumer-facing
+# method (`Worker`/`Stealer`/`Injector`) is safe Rust -- all unsafe is
+# internal to the crate, already independently audited. See #8's own
+# discussion for the full reasoning, including why this doesn't
+# contradict this crate's own "no crossbeam" tagline above (that refers
+# to the general-purpose suite -- channels, epoch GC, etc. -- not this
+# one narrowly-scoped sub-crate for a piece this project already decided
+# isn't its point to hand-roll unverified).
+crossbeam-deque = "0.8"
 # Optional (see the `futures-io-compat` feature below): a small, stable,
 # widely-depended-on crate that exists specifically to let unrelated
 # async I/O implementations interoperate -- issue #7's second option,
@@ -75,11 +90,12 @@ platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b
 # crate (what tokio-uring/glommio/monoio are all built on) as the usual
 # reference point over hand-rolling raw io_uring_setup/io_uring_enter
 # syscalls and ring memory-mapping from scratch with no loom-style
-# verification tooling to trust it, the same reasoning behind not
-# hand-rolling a lock-free deque for issue #8. Target-gated to Linux
-# (like `platform-linux` above) since the crate itself is Linux-only --
-# unlike `futures-io`, there's no cross-platform reason to leave it
-# unconditional even for `[dependencies]` purposes.
+# verification tooling to trust it, the same reasoning behind depending
+# on `crossbeam-deque` rather than hand-rolling a lock-free deque for
+# issue #8. Target-gated to Linux (like `platform-linux` above) since
+# the crate itself is Linux-only -- unlike `futures-io`, there's no
+# cross-platform reason to leave it unconditional even for
+# `[dependencies]` purposes.
 io-uring = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

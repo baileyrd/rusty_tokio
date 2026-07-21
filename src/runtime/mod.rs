@@ -30,17 +30,56 @@ use crate::sync::Notify;
 use crate::task::{self, JoinHandle};
 use crate::time::TimerDriver;
 use blocking::BlockingPool;
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// Runs `f` (a single steal attempt against a `Stealer` or `Injector`)
+/// in a loop until it stops reporting `Steal::Retry` -- `crossbeam_deque`
+/// documents `Retry` as meaning the attempt raced with a concurrent
+/// push/pop and should simply be tried again, not treated as failure;
+/// this is the crate's own recommended usage shape, not a workaround.
+fn steal_loop<T>(mut f: impl FnMut() -> Steal<T>) -> Option<T> {
+    loop {
+        match f() {
+            Steal::Success(t) => return Some(t),
+            Steal::Empty => return None,
+            Steal::Retry => continue,
+        }
+    }
+}
+
+/// The multi-threaded flavor's per-worker local queues and cross-worker
+/// stealing (`crossbeam_deque::Worker`/`Stealer` -- see issue #8), versus
+/// the current-thread flavor's single queue, touched by whichever thread
+/// happens to be inside `block_on` at any given moment and never stolen
+/// from or by anyone else (there is no sibling queue to steal from in
+/// the first place). A `Worker`'s single-owning-thread story doesn't fit
+/// "the owner can change, one `block_on` call at a time" the way it fits
+/// a multi-threaded worker's permanent dedicated background thread, and
+/// this flavor was never the point of the lock-free swap anyway (there's
+/// no contention to relieve with only one queue and no stealing), so it
+/// keeps the original plain `Mutex`-guarded queue instead.
+enum LocalQueues {
+    MultiThread {
+        /// `Stealer` is `Clone + Send + Sync`, safe to hold and index
+        /// from any thread -- each worker's own `Worker<Arc<Task>>`
+        /// lives in *that* thread's own thread-local instead (see
+        /// `worker::push_local`/`pop_local`), since `Worker` itself is
+        /// `!Sync`.
+        stealers: Vec<Stealer<Arc<task::Task>>>,
+    },
+    CurrentThread(Mutex<std::collections::VecDeque<Arc<task::Task>>>),
+}
+
 /// State shared by every worker thread, the reactor, and the timer
 /// driver. Lives for as long as the `Runtime` (and, transitively, any
 /// task holding a `Weak` back-reference to it) does.
 pub(crate) struct Shared {
-    injector: Mutex<std::collections::VecDeque<Arc<task::Task>>>,
-    local_queues: Vec<Mutex<std::collections::VecDeque<Arc<task::Task>>>>,
+    injector: Injector<Arc<task::Task>>,
+    local: LocalQueues,
     park_lock: Mutex<()>,
     park_condvar: Condvar,
     /// The *hard* shutdown flag: once set, worker threads stop picking
@@ -76,8 +115,8 @@ pub(crate) struct Shared {
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
     /// each worker has picked up by stealing from a sibling's local
     /// queue, and how many times each has parked. Indexed the same as
-    /// `local_queues`; a current-thread runtime has exactly one of each
-    /// (its single "worker 0"), same as `local_queues` itself.
+    /// `local`'s worker slots; a current-thread runtime has exactly one
+    /// of each (its single "worker 0"), same as `local` itself.
     steal_counts: Vec<AtomicU64>,
     park_counts: Vec<AtomicU64>,
     pub(crate) reactor: Arc<Reactor>,
@@ -94,32 +133,56 @@ pub(crate) struct Shared {
 
 impl Shared {
     pub(crate) fn schedule(&self, task: Arc<task::Task>) {
-        if let Some(idx) = worker::current_worker_index() {
-            self.local_queues[idx].lock().unwrap().push_back(task);
-        } else {
-            self.injector.lock().unwrap().push_back(task);
+        match &self.local {
+            LocalQueues::CurrentThread(queue) => {
+                queue.lock().unwrap().push_back(task);
+            }
+            LocalQueues::MultiThread { .. } => {
+                if worker::current_worker_index().is_some() {
+                    worker::push_local(task);
+                } else {
+                    self.injector.push(task);
+                }
+            }
         }
         self.park_condvar.notify_one();
     }
 
+    /// Pushes directly onto the shared injector, bypassing whatever
+    /// local queue the calling thread might otherwise use -- only ever
+    /// called by [`worker::block_in_place`]'s retiring-thread drain, to
+    /// hand off tasks still sitting in a `Worker` about to be dropped
+    /// (see that function's docs for why they can't just stay put).
+    pub(crate) fn requeue_to_injector(&self, task: Arc<task::Task>) {
+        self.injector.push(task);
+    }
+
     pub(crate) fn next_task(&self, idx: usize) -> Option<Arc<task::Task>> {
-        if let Some(t) = self.local_queues[idx].lock().unwrap().pop_front() {
-            return Some(t);
-        }
-        if let Some(t) = self.injector.lock().unwrap().pop_front() {
-            return Some(t);
-        }
-        let n = self.local_queues.len();
-        for offset in 1..n {
-            let victim = (idx + offset) % n;
-            if let Ok(mut q) = self.local_queues[victim].try_lock() {
-                if let Some(t) = q.pop_back() {
-                    self.steal_counts[idx].fetch_add(1, Ordering::Relaxed);
+        match &self.local {
+            LocalQueues::CurrentThread(queue) => {
+                if let Some(t) = queue.lock().unwrap().pop_front() {
                     return Some(t);
                 }
+                steal_loop(|| self.injector.steal())
+            }
+            LocalQueues::MultiThread { stealers } => {
+                if let Some(t) = worker::pop_local() {
+                    return Some(t);
+                }
+                if let Some(t) = worker::steal_from_injector(&self.injector) {
+                    return Some(t);
+                }
+                let n = stealers.len();
+                for offset in 1..n {
+                    let victim = (idx + offset) % n;
+                    if let Some(t) = worker::steal_from_sibling(&stealers[victim]) {
+                        self.steal_counts[idx].fetch_add(1, Ordering::Relaxed);
+                        return Some(t);
+                    }
+                }
+                None
             }
         }
-        None
     }
 
     /// Sleep until woken by a new task, or until the timeout elapses
@@ -224,7 +287,10 @@ impl Shared {
     // costs nothing on the hot scheduling path itself.
 
     pub(crate) fn num_workers(&self) -> usize {
-        self.local_queues.len()
+        match &self.local {
+            LocalQueues::CurrentThread(_) => 1,
+            LocalQueues::MultiThread { stealers } => stealers.len(),
+        }
     }
 
     pub(crate) fn num_alive_tasks(&self) -> usize {
@@ -232,11 +298,14 @@ impl Shared {
     }
 
     pub(crate) fn global_queue_depth(&self) -> usize {
-        self.injector.lock().unwrap().len()
+        self.injector.len()
     }
 
     pub(crate) fn worker_local_queue_depth(&self, worker: usize) -> usize {
-        self.local_queues[worker].lock().unwrap().len()
+        match &self.local {
+            LocalQueues::CurrentThread(queue) => queue.lock().unwrap().len(),
+            LocalQueues::MultiThread { stealers } => stealers[worker].len(),
+        }
     }
 
     pub(crate) fn worker_steal_count(&self, worker: usize) -> u64 {
@@ -344,15 +413,52 @@ impl Builder {
         } else {
             self.worker_threads
         };
-        let local_queues = (0..queue_count)
-            .map(|_| Mutex::new(std::collections::VecDeque::new()))
-            .collect();
         let steal_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
         let park_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
 
+        // For the multi-threaded flavor, each worker's `Worker<Arc<Task>>`
+        // has to be created up front (to hand out its `Stealer` for
+        // `Shared` to hold), then handed off *out* of `Shared` to
+        // whichever thread ends up actually running as that index --
+        // `Worker` is `!Sync`, so it can't live centrally in `Shared`
+        // the way the old `Mutex`-guarded queues did.
+        let (local, local_workers) = if is_current_thread {
+            (
+                LocalQueues::CurrentThread(Mutex::new(std::collections::VecDeque::new())),
+                None,
+            )
+        } else {
+            // `new_fifo()`, not `new_lifo()`: LIFO would put a
+            // self-rescheduled task (e.g. one that just called
+            // `task::yield_now()`) right back on top of its own local
+            // queue, where it gets popped again immediately -- starving
+            // any sibling task sitting lower in the same queue instead
+            // of giving it the turn `yield_now`'s own contract promises
+            // ("letting the scheduler run other queued work before it's
+            // polled again"). `tests/runtime.rs`'s
+            // `yield_now_lets_two_same_queue_tasks_interleave` encodes
+            // exactly this fairness guarantee. FIFO does mean a thief's
+            // `steal()` and the owner's own `pop()` contend on the same
+            // end of the deque (see `crossbeam_deque`'s own docs) rather
+            // than the opposite ends LIFO would give them -- in practice
+            // this doesn't meaningfully hurt stealing (still lock-free,
+            // still retries through transient contention), it's the
+            // *owner draining its own queue faster than the OS can
+            // schedule an idle sibling to even attempt a steal* that
+            // needs a large-enough workload to reliably observe, not a
+            // FIFO-vs-LIFO question -- see
+            // `worker_steal_count_increments_when_a_sibling_steals_work`'s
+            // own comment in `tests/metrics.rs`.
+            let local_workers: Vec<Worker<Arc<task::Task>>> = (0..self.worker_threads)
+                .map(|_| Worker::new_fifo())
+                .collect();
+            let stealers = local_workers.iter().map(Worker::stealer).collect();
+            (LocalQueues::MultiThread { stealers }, Some(local_workers))
+        };
+
         let shared = Arc::new(Shared {
-            injector: Mutex::new(std::collections::VecDeque::new()),
-            local_queues,
+            injector: Injector::new(),
+            local,
             park_lock: Mutex::new(()),
             park_condvar: Condvar::new(),
             shutdown: AtomicBool::new(false),
@@ -370,15 +476,13 @@ impl Builder {
             is_current_thread,
         });
 
-        let workers = if is_current_thread {
-            None
-        } else {
-            Some(
-                (0..self.worker_threads)
-                    .map(|idx| worker::spawn_worker(shared.clone(), idx))
-                    .collect(),
-            )
-        };
+        let workers = local_workers.map(|local_workers| {
+            local_workers
+                .into_iter()
+                .enumerate()
+                .map(|(idx, local_worker)| worker::spawn_worker(shared.clone(), idx, local_worker))
+                .collect()
+        });
 
         Ok(Runtime {
             shared,

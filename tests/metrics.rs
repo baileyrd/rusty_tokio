@@ -113,8 +113,22 @@ fn worker_steal_count_increments_when_a_sibling_steals_work() {
         // `worker_local_queue_depth`'s test above) -- the other worker
         // has nothing of its own to run and can only get work by
         // stealing from that pile.
+        //
+        // A large pile, deliberately -- the busy worker's own pop and a
+        // thief's steal are lock-free (see issue #8), fast enough that a
+        // *small* pile can be fully drained by its owner before the idle
+        // sibling's OS thread is even scheduled to attempt a steal at
+        // all (confirmed by instrumenting this exact scenario: with a
+        // few dozen nested tasks, the sibling's very first steal attempt
+        // sometimes already sees an empty queue). Tens of thousands of
+        // tasks keeps the busy worker occupied long enough in absolute
+        // wall-clock time that the sibling is essentially guaranteed a
+        // real window, regardless of OS scheduling latency -- verified
+        // stable (0 failures) across 30 repeated runs even under
+        // artificial heavy CPU pressure (12 busy-loop processes
+        // saturating this 4-core sandbox).
         rusty_tokio::spawn(async {
-            for _ in 0..64 {
+            for _ in 0..20_000 {
                 rusty_tokio::spawn(async {
                     rusty_tokio::task::yield_now().await;
                 });

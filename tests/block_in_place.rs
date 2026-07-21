@@ -96,3 +96,41 @@ fn block_in_place_panics_inside_a_spawn_blocking_closure() {
         assert!(result.unwrap_err().is_panic());
     });
 }
+
+#[test]
+fn block_in_place_hands_off_tasks_still_queued_on_the_retiring_worker() {
+    // A single worker: unlike `block_in_place_lets_a_sibling_task_run_
+    // while_it_blocks` above (where both tasks are spawned from
+    // `block_on`'s own thread and land in the shared injector), these
+    // nested spawns happen from *inside* the task that goes on to call
+    // `block_in_place`, so they land on this same worker's own local
+    // queue -- the retiring thread's `Worker` (issue #8), not the
+    // injector. Once this thread retires (its replacement has taken
+    // over the worker slot), that `Worker` would otherwise just be
+    // dropped along with whatever's still queued in it -- these handles
+    // hanging forever, never notified, if that hand-off didn't happen.
+    let rt = Runtime::builder().worker_threads(1).build().unwrap();
+    rt.block_on(async {
+        let hog = rusty_tokio::spawn(async {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                handles.push(rusty_tokio::spawn(async { 1 + 1 }));
+            }
+            task::block_in_place(|| std::thread::sleep(Duration::from_millis(50)));
+            handles
+        });
+        let handles = hog.await.unwrap();
+        for handle in handles {
+            let result = rusty_tokio::time::timeout(Duration::from_secs(2), handle).await;
+            assert_eq!(
+                result
+                    .expect(
+                        "a task still queued on the retiring worker when it retired should \
+                         still get run via the shared injector, not hang forever"
+                    )
+                    .unwrap(),
+                2
+            );
+        }
+    });
+}
