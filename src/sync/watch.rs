@@ -1,10 +1,11 @@
 //! A single-latest-value broadcast: the sender always holds exactly one
 //! current value, and `Receiver::changed().await` resolves once it's
-//! been updated since this receiver last observed it. Unlike a
-//! multi-consumer channel that queues every message (not implemented in
-//! this crate), there's no queue and no lagging -- a receiver that
-//! misses several updates in a row just sees the latest value whenever
-//! it does check, not every intermediate one. Useful for something like
+//! been updated since this receiver last observed it. Unlike
+//! [`super::broadcast`] (a multi-consumer channel that queues every
+//! message, reporting `Lagged` if a receiver falls behind), there's no
+//! queue and no lagging here -- a receiver that misses several updates
+//! in a row just sees the latest value whenever it does check, not
+//! every intermediate one. Useful for something like
 //! "the current configuration" or "has shutdown been requested" that
 //! many tasks want to observe, exactly the shape
 //! [`crate::Handle::shutdown_notified`]/`is_shutting_down` hand-rolled

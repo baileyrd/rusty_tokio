@@ -214,7 +214,18 @@ rustils' API can't support them yet.
   mid-`.await` (its task gets aborted), the cell resets to uninitialized
   rather than getting stuck reporting "initializing" forever -- every
   other parked caller wakes back up and one of them becomes the new
-  initializer.
+  initializer. Also `broadcast`: a multi-producer, multi-consumer
+  channel where every receiver gets its own copy of every message -- a
+  real, distinct set of semantics from `mpsc`'s (one message, one
+  receiver), not just "mpsc with multiple receivers." A fixed-capacity
+  ring buffer backs it; `send` never waits for room, simply overwriting
+  the oldest message once full. Each `Receiver` tracks its own read
+  position, so a receiver that falls behind the oldest message still
+  buffered gets `RecvError::Lagged(n)` on its next `recv()` (reporting
+  exactly how many it missed) and resumes from the oldest still-available
+  message afterward, rather than reporting `Lagged` forever or blocking
+  the sender. `Sender::subscribe()` adds receivers after the fact --
+  fresh ones only see messages sent from then on.
 - **`select!`**: race two to five futures, running whichever resolves
   first and dropping (cancelling) the rest -- `rusty_tokio::select! { pat
   = future => body, ... }`. Deliberately scoped rather than a full

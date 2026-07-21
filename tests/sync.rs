@@ -700,3 +700,151 @@ fn once_cell_concurrent_waiters_see_the_first_successful_result_after_a_panic() 
         assert_eq!(cell.get(), Some(&123));
     });
 }
+
+#[test]
+fn broadcast_every_receiver_gets_every_message() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx1) = rusty_tokio::sync::broadcast::channel::<i32>(8);
+        let mut rx2 = tx.subscribe();
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+
+        assert_eq!(rx1.recv().await.unwrap(), 1);
+        assert_eq!(rx1.recv().await.unwrap(), 2);
+        assert_eq!(rx2.recv().await.unwrap(), 1);
+        assert_eq!(rx2.recv().await.unwrap(), 2);
+    });
+}
+
+#[test]
+fn broadcast_subscribe_only_sees_messages_sent_afterward() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, _rx1) = rusty_tokio::sync::broadcast::channel::<i32>(8);
+        tx.send(1).unwrap();
+
+        let mut late = tx.subscribe();
+        tx.send(2).unwrap();
+
+        assert_eq!(late.recv().await.unwrap(), 2);
+    });
+}
+
+#[test]
+fn broadcast_recv_waits_for_a_message_sent_later() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<&str>(4);
+        rusty_tokio::spawn(async move {
+            rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send("hello").unwrap();
+        });
+        assert_eq!(rx.recv().await.unwrap(), "hello");
+    });
+}
+
+#[test]
+fn broadcast_lagging_receiver_reports_how_many_it_missed() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<i32>(2);
+        for i in 0..5 {
+            tx.send(i).unwrap();
+        }
+        // Capacity 2, five sent -- this receiver is now three behind
+        // the oldest still-buffered message (values 2 and 3).
+        match rx.recv().await {
+            Err(rusty_tokio::sync::broadcast::RecvError::Lagged(n)) => assert_eq!(n, 3),
+            other => panic!("expected Lagged(3), got {other:?}"),
+        }
+        // Resumes from the oldest still-available message afterward,
+        // not stuck reporting Lagged again.
+        assert_eq!(rx.recv().await.unwrap(), 3);
+        assert_eq!(rx.recv().await.unwrap(), 4);
+    });
+}
+
+#[test]
+fn broadcast_recv_reports_closed_once_every_sender_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<i32>(4);
+        tx.send(1).unwrap();
+        drop(tx);
+
+        assert_eq!(rx.recv().await.unwrap(), 1);
+        assert_eq!(
+            rx.recv().await.unwrap_err(),
+            rusty_tokio::sync::broadcast::RecvError::Closed
+        );
+    });
+}
+
+#[test]
+fn broadcast_send_fails_once_every_receiver_drops() {
+    let (tx, rx) = rusty_tokio::sync::broadcast::channel::<i32>(4);
+    drop(rx);
+    assert!(tx.send(1).is_err());
+}
+
+#[test]
+fn broadcast_send_returns_the_current_receiver_count() {
+    let (tx, _rx1) = rusty_tokio::sync::broadcast::channel::<i32>(4);
+    let _rx2 = tx.subscribe();
+    let _rx3 = tx.subscribe();
+    assert_eq!(tx.send(1).unwrap(), 3);
+    assert_eq!(tx.receiver_count(), 3);
+}
+
+#[test]
+fn broadcast_try_recv_reports_empty_lagged_and_closed() {
+    let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<i32>(2);
+    assert_eq!(
+        rx.try_recv().unwrap_err(),
+        rusty_tokio::sync::broadcast::TryRecvError::Empty
+    );
+
+    for i in 0..4 {
+        tx.send(i).unwrap();
+    }
+    assert_eq!(
+        rx.try_recv().unwrap_err(),
+        rusty_tokio::sync::broadcast::TryRecvError::Lagged(2)
+    );
+    assert_eq!(rx.try_recv().unwrap(), 2);
+    assert_eq!(rx.try_recv().unwrap(), 3);
+    assert_eq!(
+        rx.try_recv().unwrap_err(),
+        rusty_tokio::sync::broadcast::TryRecvError::Empty
+    );
+
+    drop(tx);
+    assert_eq!(
+        rx.try_recv().unwrap_err(),
+        rusty_tokio::sync::broadcast::TryRecvError::Closed
+    );
+}
+
+#[test]
+fn broadcast_ring_buffer_overwrites_the_oldest_slot_once_full() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<i32>(3);
+        for i in 0..3 {
+            tx.send(i).unwrap();
+        }
+        // Fully caught up -- no lag yet.
+        assert_eq!(rx.recv().await.unwrap(), 0);
+        tx.send(3).unwrap(); // evicts `0`, but rx already read it
+        tx.send(4).unwrap(); // evicts `1`
+        match rx.recv().await {
+            Err(rusty_tokio::sync::broadcast::RecvError::Lagged(n)) => assert_eq!(n, 1),
+            other => panic!("expected Lagged(1), got {other:?}"),
+        }
+        assert_eq!(rx.recv().await.unwrap(), 2);
+        assert_eq!(rx.recv().await.unwrap(), 3);
+        assert_eq!(rx.recv().await.unwrap(), 4);
+    });
+}

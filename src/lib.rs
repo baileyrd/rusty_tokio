@@ -43,9 +43,10 @@
 //!   a manually-driven virtual clock for deterministic timer tests that
 //!   don't want to wait on real wall time.
 //! - [`sync`]: `Notify`, an async `Mutex`/`RwLock`, `Semaphore`,
-//!   `OnceCell`, `oneshot`, `watch`, and bounded/unbounded `mpsc` -- the
-//!   primitives
-//!   above are usually enough to build everything else on top of.
+//!   `OnceCell`, `oneshot`, `watch`, bounded/unbounded `mpsc`, and
+//!   `broadcast` (every receiver gets every message, reporting `Lagged`
+//!   if one falls behind) -- the primitives above are usually enough to
+//!   build everything else on top of.
 //! - [`select!`]: race two to five futures, running whichever resolves
 //!   first and dropping the rest -- see that macro's own docs for
 //!   exactly what's (and isn't) supported.
