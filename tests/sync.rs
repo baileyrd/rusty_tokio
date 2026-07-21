@@ -252,6 +252,106 @@ fn semaphore_owned_permit_moves_into_a_spawned_task() {
 }
 
 #[test]
+fn watch_initial_value_is_observable_without_waiting() {
+    let (_tx, rx) = rusty_tokio::sync::watch::channel(42);
+    assert_eq!(*rx.borrow(), 42);
+}
+
+#[test]
+fn watch_changed_resolves_once_send_happens() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let waiter = rusty_tokio::spawn(async move {
+            rx.changed().await.unwrap();
+            *rx.borrow()
+        });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send(7).unwrap();
+        assert_eq!(waiter.await.unwrap(), 7);
+    });
+}
+
+#[test]
+fn watch_every_clone_observes_the_same_change() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx1) = rusty_tokio::sync::watch::channel(0);
+        let mut rx2 = rx1.clone();
+
+        let w1 = rusty_tokio::spawn(async move {
+            rx1.changed().await.unwrap();
+            *rx1.borrow()
+        });
+        let w2 = rusty_tokio::spawn(async move {
+            rx2.changed().await.unwrap();
+            *rx2.borrow()
+        });
+
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send(99).unwrap();
+
+        assert_eq!(w1.await.unwrap(), 99);
+        assert_eq!(w2.await.unwrap(), 99);
+    });
+}
+
+#[test]
+fn watch_changed_reports_closed_once_the_sender_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let waiter = rusty_tokio::spawn(async move { rx.changed().await });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(tx);
+        assert!(waiter.await.unwrap().is_err());
+    });
+}
+
+#[test]
+fn watch_send_reports_no_receivers_left_once_every_receiver_drops() {
+    let (tx, rx) = rusty_tokio::sync::watch::channel(0);
+    drop(rx);
+    assert!(tx.send(1).is_err());
+}
+
+#[test]
+fn watch_send_modify_updates_in_place_and_counts_as_a_change() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(vec![1, 2, 3]);
+        let waiter = rusty_tokio::spawn(async move {
+            rx.changed().await.unwrap();
+            rx.borrow().clone()
+        });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send_modify(|v| v.push(4));
+        assert_eq!(waiter.await.unwrap(), vec![1, 2, 3, 4]);
+    });
+}
+
+#[test]
+fn watch_borrow_and_update_marks_the_current_version_seen() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(1);
+        tx.send(2).unwrap();
+        // Marks version 2 as already seen -- a subsequent `changed()`
+        // should wait for a *third* value, not resolve immediately for
+        // this same one again.
+        assert_eq!(*rx.borrow_and_update(), 2);
+
+        let waiter = rusty_tokio::spawn(async move {
+            rx.changed().await.unwrap();
+            *rx.borrow()
+        });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send(3).unwrap();
+        assert_eq!(waiter.await.unwrap(), 3);
+    });
+}
+
+#[test]
 fn oneshot_delivers_the_value() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
