@@ -55,7 +55,7 @@ fn run(shared: &Arc<Shared>, idx: usize) {
     while !shared.is_shutdown() {
         match shared.next_task(idx) {
             Some(task) => task.run(),
-            None => shared.park(),
+            None => shared.park(idx),
         }
     }
 }

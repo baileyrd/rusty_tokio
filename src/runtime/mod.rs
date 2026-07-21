@@ -19,9 +19,11 @@
 mod blocking;
 mod context;
 mod current_thread;
+mod metrics;
 mod worker;
 
 pub use context::Handle;
+pub use metrics::RuntimeMetrics;
 
 use crate::io::reactor::Reactor;
 use crate::sync::Notify;
@@ -29,7 +31,7 @@ use crate::task::{self, JoinHandle};
 use crate::time::TimerDriver;
 use blocking::BlockingPool;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,6 +73,13 @@ pub(crate) struct Shared {
     active_tasks: AtomicUsize,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
+    /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
+    /// each worker has picked up by stealing from a sibling's local
+    /// queue, and how many times each has parked. Indexed the same as
+    /// `local_queues`; a current-thread runtime has exactly one of each
+    /// (its single "worker 0"), same as `local_queues` itself.
+    steal_counts: Vec<AtomicU64>,
+    park_counts: Vec<AtomicU64>,
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
     pub(crate) blocking_pool: BlockingPool,
@@ -105,6 +114,7 @@ impl Shared {
             let victim = (idx + offset) % n;
             if let Ok(mut q) = self.local_queues[victim].try_lock() {
                 if let Some(t) = q.pop_back() {
+                    self.steal_counts[idx].fetch_add(1, Ordering::Relaxed);
                     return Some(t);
                 }
             }
@@ -115,7 +125,11 @@ impl Shared {
     /// Sleep until woken by a new task, or until the timeout elapses
     /// (the timeout is a safety net, not the primary wake path -- it
     /// bounds how long a worker can go without re-checking `shutdown`).
-    fn park(&self) {
+    /// `idx` is only used to attribute the park to the right
+    /// `RuntimeMetrics::worker_park_count` counter -- every worker
+    /// shares the same `park_lock`/`park_condvar`.
+    fn park(&self, idx: usize) {
+        self.park_counts[idx].fetch_add(1, Ordering::Relaxed);
         let guard = self.park_lock.lock().unwrap();
         let _ = self
             .park_condvar
@@ -203,6 +217,38 @@ impl Shared {
 
     pub(crate) fn is_current_thread(&self) -> bool {
         self.is_current_thread
+    }
+
+    // -- RuntimeMetrics accessors -- plain atomic loads (or a lock also
+    // taken on every schedule/steal regardless), so calling any of these
+    // costs nothing on the hot scheduling path itself.
+
+    pub(crate) fn num_workers(&self) -> usize {
+        self.local_queues.len()
+    }
+
+    pub(crate) fn num_alive_tasks(&self) -> usize {
+        self.active_tasks.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn global_queue_depth(&self) -> usize {
+        self.injector.lock().unwrap().len()
+    }
+
+    pub(crate) fn worker_local_queue_depth(&self, worker: usize) -> usize {
+        self.local_queues[worker].lock().unwrap().len()
+    }
+
+    pub(crate) fn worker_steal_count(&self, worker: usize) -> u64 {
+        self.steal_counts[worker].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn worker_park_count(&self, worker: usize) -> u64 {
+        self.park_counts[worker].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn num_blocking_threads(&self) -> usize {
+        self.blocking_pool.live_threads()
     }
 }
 
@@ -301,6 +347,8 @@ impl Builder {
         let local_queues = (0..queue_count)
             .map(|_| Mutex::new(std::collections::VecDeque::new()))
             .collect();
+        let steal_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
+        let park_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
 
         let shared = Arc::new(Shared {
             injector: Mutex::new(std::collections::VecDeque::new()),
@@ -314,6 +362,8 @@ impl Builder {
             active_tasks: AtomicUsize::new(0),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
+            steal_counts,
+            park_counts,
             reactor,
             timer,
             blocking_pool,
@@ -364,6 +414,15 @@ impl Runtime {
 
     pub fn handle(&self) -> Handle {
         Handle {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// A live view into this runtime's scheduler and blocking pool --
+    /// see [`RuntimeMetrics`] for what's on it. Equivalent to
+    /// `self.handle().metrics()`.
+    pub fn metrics(&self) -> RuntimeMetrics {
+        RuntimeMetrics {
             shared: self.shared.clone(),
         }
     }

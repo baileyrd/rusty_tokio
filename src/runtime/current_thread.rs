@@ -60,7 +60,7 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
         // multi-threaded worker loop already uses (see `Shared::park`'s
         // docs): a wakeup racing the check-then-park window here is
         // caught by that timeout, not lost outright.
-        shared.park();
+        shared.park(0);
     }
 }
 
