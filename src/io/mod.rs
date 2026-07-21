@@ -23,6 +23,7 @@ mod buffered;
 mod compat;
 pub(crate) mod reactor;
 mod socket;
+mod stdio;
 mod tcp;
 mod udp;
 mod unix;
@@ -34,6 +35,7 @@ pub use async_io::{
 pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
 pub use compat::Compat;
+pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
 pub use udp::UdpSocket;
 pub use unix::{

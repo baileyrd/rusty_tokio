@@ -289,6 +289,25 @@ rustils' API can't support them yet.
   already-abandoned-`spawn_blocking`-call behavior every other blocking
   op has), and the *next* operation on that `File` drains the leftover
   result (discarding it if it doesn't match) before starting its own.
+- **Async stdio** (`io::stdin`/`stdout`/`stderr`): the same
+  `spawn_blocking`-abstraction shape as `fs::File` -- stdio generally
+  can't be registered with a reactor either -- but simpler in one way
+  (there's no persistent OS resource to move in and out of the blocking
+  closure the way `File`'s `std::fs::File` is; `std::io::stdin()`/
+  `stdout()`/`stderr()` are obtained fresh on every call) and more
+  involved in another: every `Stdout`/`Stderr` is writing to the exact
+  same process-wide stream as every other one, so two tasks' writes
+  interleaving mid-buffer would be a real, visible bug (garbled output),
+  not a theoretical one, the way it isn't for two independent
+  `TcpStream`s. Fixed two ways together: `poll_write` always calls
+  `std::io::Write::write_all` internally, so one call is always
+  all-or-nothing -- never a partial count a caller's own `write_all` loop
+  might otherwise interleave with someone else's between chunks -- and
+  each call holds a process-wide `Mutex` (one per stream, so writing to
+  `stdout` never waits on something reading `stdin`) for its *entire*
+  duration, not just the underlying syscall. Together, no two concurrent
+  logical writes to the same stream can interleave, regardless of how
+  many syscalls `write_all` itself ends up needing.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
