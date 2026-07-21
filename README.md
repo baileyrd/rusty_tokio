@@ -373,6 +373,26 @@ rustils' API can't support them yet.
   task awaiting it -- not a parallel handle type -- so panics, abort,
   and `.await` on the returned `JoinHandle` all reuse the same task
   machinery every other spawned task does.
+- **`task::block_in_place`**: a different pattern from `spawn_blocking`
+  -- borrows the *current* worker thread for a blocking closure instead
+  of delegating to a separate one, useful when the blocking call needs
+  to interleave with non-`Send` local state that can't cross into a
+  `spawn_blocking` closure (which must be `Send + 'static`). Since the
+  closure runs on the same thread as the calling task, that thread would
+  otherwise stop servicing the rest of the pool for however long it
+  takes; to avoid that, `block_in_place` hands the calling thread's
+  other queued work off to a freshly spawned replacement worker thread
+  before running the closure, then retires (exits) the original thread
+  once its current task finishes, rather than looping back to service
+  the same worker index a second time alongside the replacement. A
+  simpler trade-off than tokio's own approach (which hands a "core" back
+  and forth and can reuse the blocked thread as a *future* replacement)
+  -- an extra OS thread spawn per call, in exchange for a much easier
+  implementation to get right. Panics if called outside a task actually
+  running on a multi-threaded runtime's worker pool -- directly inside
+  `block_on`, from a `spawn_blocking` closure, or on a
+  `Builder::new_current_thread()` runtime, which has no worker pool to
+  hand work off to in the first place.
 - **`#[rusty_tokio::main]`/`#[rusty_tokio::test]`**: attribute macros
   rewriting an `async fn` into the `Runtime::new().unwrap().block_on(
   async { .. })` boilerplate every example and test in this crate used

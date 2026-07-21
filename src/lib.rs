@@ -30,7 +30,12 @@
 //!   every function signature -- scoped to a task's execution rather
 //!   than an OS thread, so it isolates correctly even when many tasks'
 //!   polls interleave on one worker thread, unlike a plain
-//!   `std::thread_local!`.
+//!   `std::thread_local!`. Also [`task::block_in_place`], for a blocking
+//!   call that needs to interleave with non-`Send` local state that
+//!   can't cross into a `spawn_blocking` closure -- it runs inline, on
+//!   the calling worker thread, first handing that thread's other queued
+//!   work off to a freshly spawned replacement so the rest of the pool
+//!   doesn't stall waiting on it.
 //! - [`Runtime`] / [`Handle`]: two flavors. The default
 //!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
 //!   threads, each with its own run queue, backed by a shared injector

@@ -117,6 +117,35 @@ impl Handle {
             shared: self.shared.clone(),
         }
     }
+
+    /// Runs `f` inline on the calling thread, first handing its other
+    /// queued work off to a freshly spawned replacement worker so the
+    /// rest of the pool doesn't stall while `f` (expected to block) runs.
+    /// See [`crate::task::block_in_place`] for the full contract --
+    /// that's the public entry point; this is where it's actually
+    /// implemented, since it needs `Shared`/worker-pool access `task`
+    /// doesn't have.
+    ///
+    /// # Panics
+    /// See [`crate::task::block_in_place`]'s doc comment.
+    pub(crate) fn block_in_place<R>(&self, f: impl FnOnce() -> R) -> R {
+        assert!(
+            !self.is_current_thread(),
+            "block_in_place is not supported on a Builder::new_current_thread() \
+             runtime -- there is no worker pool to hand this thread's other \
+             queued work off to, and there's only ever the one thread to begin \
+             with; use spawn_blocking instead"
+        );
+        let idx = super::worker::current_worker_index().unwrap_or_else(|| {
+            panic!(
+                "block_in_place called from a thread with no ambient worker -- \
+                 only valid from within a task actually running on a \
+                 multi-threaded Runtime's worker pool, not directly inside \
+                 block_on or a spawn_blocking closure"
+            )
+        });
+        super::worker::block_in_place(&self.shared, idx, f)
+    }
 }
 
 /// Installs `handle` as the ambient runtime for as long as the guard

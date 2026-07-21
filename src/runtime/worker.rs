@@ -8,6 +8,12 @@ use std::sync::Arc;
 
 thread_local! {
     static WORKER_INDEX: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Set by [`block_in_place`] once this thread's worker slot has been
+    /// permanently handed off to a freshly spawned replacement -- checked
+    /// by [`run`]'s own loop so this thread retires (exits) as soon as
+    /// its current task finishes, instead of looping back to service the
+    /// same `idx` a second, redundant time alongside the replacement.
+    static RETIRED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn current_worker_index() -> Option<usize> {
@@ -57,5 +63,43 @@ fn run(shared: &Arc<Shared>, idx: usize) {
             Some(task) => task.run(),
             None => shared.park(idx),
         }
+        if RETIRED.with(Cell::get) {
+            return;
+        }
     }
+}
+
+/// Runs `f` -- expected to block, unlike ordinary async code -- on the
+/// calling thread, first handing this worker's other queued work off to
+/// a freshly spawned replacement so the rest of the pool doesn't stall
+/// waiting on it. See [`crate::task::block_in_place`]'s doc comment for
+/// the full contract this backs; the caller (`Handle::block_in_place`)
+/// has already confirmed `idx` really is the calling thread's own
+/// worker index.
+///
+/// Deliberately simple rather than reusing tokio's actual approach
+/// (handing the "core" back and forth, potentially reusing the blocked
+/// thread as a *future* replacement rather than retiring it): this
+/// always spawns a genuinely fresh OS thread and always retires the
+/// calling one once its current task finishes, at the cost of one extra
+/// thread spawn per call -- an explicit trade-off for a much simpler
+/// implementation, matching how `BlockingPool` already documents its own
+/// growth trade-offs elsewhere in this crate. The replacement's
+/// `JoinHandle` is intentionally not tracked or joined by `Runtime`
+/// itself -- it observes the same `shared.is_shutdown()` flag as every
+/// other worker and exits on its own, so shutdown still fully quiesces
+/// task execution; it just isn't one of the threads
+/// `Runtime::shutdown_timeout`'s final join loop explicitly waits on.
+///
+/// A second (or later) `block_in_place` call from *within* the same
+/// still-blocked stack (nested, or called more than once before this
+/// task's poll returns) reuses the one replacement already spawned for
+/// this thread's eventual retirement, rather than spawning another --
+/// harmless either way, but pointless churn to repeat.
+pub(super) fn block_in_place<R>(shared: &Arc<Shared>, idx: usize, f: impl FnOnce() -> R) -> R {
+    if !RETIRED.with(Cell::get) {
+        spawn_worker(shared.clone(), idx);
+        RETIRED.with(|r| r.set(true));
+    }
+    f()
 }
