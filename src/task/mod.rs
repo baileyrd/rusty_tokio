@@ -18,6 +18,7 @@
 //! just leaves a note (`NOTIFIED`) for the poller to see when it's done,
 //! and the poller reschedules itself if that note is present.
 
+mod block_in_place;
 mod builder;
 mod id;
 mod join;
@@ -27,6 +28,7 @@ mod local_key;
 mod state;
 mod yield_now;
 
+pub use block_in_place::block_in_place;
 pub use builder::Builder;
 pub use id::{try_id, try_name, TaskId};
 pub use join::{JoinError, JoinHandle};
