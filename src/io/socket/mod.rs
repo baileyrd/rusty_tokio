@@ -389,3 +389,95 @@ pub(crate) fn shutdown_write(fd: RawFd) -> io::Result<()> {
         Ok(())
     }
 }
+
+/// `bind(2)` on a bare (not yet bound) socket -- backs [`TcpSocket`
+/// ](super::TcpSocket)'s `bind`, which needs bind and listen as two
+/// separate steps (so socket options can be set on the still-unbound
+/// socket first); rustils' own `{Linux,Macos}TcpListener::bind` only
+/// exposes the combined "bind and immediately listen" operation.
+pub(crate) fn bind(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
+    let (storage, len) = to_sockaddr(addr);
+    // SAFETY: `storage` holds a valid sockaddr for exactly `len` bytes
+    // (`to_sockaddr`'s contract); `fd` is caller-owned and not yet bound.
+    cvt(unsafe {
+        libc::bind(
+            fd,
+            (&storage as *const sockaddr_storage).cast::<sockaddr>(),
+            len,
+        )
+    })?;
+    Ok(())
+}
+
+/// `listen(2)` -- the other half of [`bind`] above, turning a bound
+/// socket into one the kernel will queue incoming connections for.
+pub(crate) fn listen(fd: RawFd, backlog: u32) -> io::Result<()> {
+    // SAFETY: `fd` is caller-owned and already bound.
+    cvt(unsafe { libc::listen(fd, backlog as c_int) })?;
+    Ok(())
+}
+
+fn setsockopt_int(fd: RawFd, level: c_int, name: c_int, value: c_int) -> io::Result<()> {
+    // SAFETY: `&value` is a valid `c_int` the kernel only reads for the
+    // call's duration; `fd` is caller-owned.
+    cvt(unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            (&value as *const c_int).cast(),
+            mem::size_of::<c_int>() as socklen_t,
+        )
+    })?;
+    Ok(())
+}
+
+fn getsockopt_int(fd: RawFd, level: c_int, name: c_int) -> io::Result<c_int> {
+    let mut value: c_int = 0;
+    let mut len = mem::size_of::<c_int>() as socklen_t;
+    // SAFETY: `&mut value`/`&mut len` are valid, exclusively borrowed
+    // out-params the kernel fills; `fd` is caller-owned.
+    cvt(unsafe { libc::getsockopt(fd, level, name, (&mut value as *mut c_int).cast(), &mut len) })?;
+    Ok(value)
+}
+
+/// `SO_REUSEADDR` -- not in rustils' `TcpStream`/`TcpListener` traits at
+/// all (per that crate's `net.rs`, only `set_nodelay` is), so hand-rolled
+/// here the same way the rest of this module's slivers are.
+pub(crate) fn set_reuseaddr(fd: RawFd, reuse: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, reuse as c_int)
+}
+
+pub(crate) fn reuseaddr(fd: RawFd) -> io::Result<bool> {
+    Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)? != 0)
+}
+
+/// `SO_REUSEPORT` -- supported by both this crate's targets (Linux since
+/// kernel 3.9, macOS/BSD for much longer), unlike some other platforms.
+pub(crate) fn set_reuseport(fd: RawFd, reuse: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, reuse as c_int)
+}
+
+pub(crate) fn reuseport(fd: RawFd) -> io::Result<bool> {
+    Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT)? != 0)
+}
+
+pub(crate) fn set_send_buffer_size(fd: RawFd, size: u32) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, size as c_int)
+}
+
+/// The kernel doesn't necessarily use exactly the size last requested
+/// (Linux, notably, doubles whatever's set to leave room for its own
+/// bookkeeping) -- read this back to see what was actually applied,
+/// rather than assuming the requested value stuck.
+pub(crate) fn send_buffer_size(fd: RawFd) -> io::Result<u32> {
+    Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_SNDBUF)? as u32)
+}
+
+pub(crate) fn set_recv_buffer_size(fd: RawFd, size: u32) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, size as c_int)
+}
+
+pub(crate) fn recv_buffer_size(fd: RawFd) -> io::Result<u32> {
+    Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF)? as u32)
+}

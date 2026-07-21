@@ -3,7 +3,7 @@ use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -400,5 +400,139 @@ impl AsyncWrite for OwnedWriteHalf {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut &*self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// A TCP socket that's neither bound nor connected yet -- a staging
+/// point for setting socket options (`SO_REUSEADDR`, `SO_REUSEPORT`,
+/// send/receive buffer sizes) before committing to either direction,
+/// unlike [`TcpListener::bind`]/[`TcpStream::connect`], which go
+/// straight from nothing to bound-and-listening/connected in one call
+/// with no such opportunity. Mirrors tokio's own `net::TcpSocket`.
+///
+/// None of these four options are in rustils' `TcpStream`/`TcpListener`
+/// traits at all (only `set_nodelay` is), so every method here is a
+/// hand-rolled `setsockopt`/`getsockopt` call in `socket/mod.rs`, the
+/// same sliver-of-raw-libc treatment `connect`/`take_socket_error`
+/// already get there.
+pub struct TcpSocket {
+    fd: OwnedFd,
+}
+
+impl TcpSocket {
+    /// A bare, non-blocking IPv4 socket -- neither bound nor connected.
+    pub fn new_v4() -> io::Result<TcpSocket> {
+        Self::new(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)))
+    }
+
+    /// A bare, non-blocking IPv6 socket -- neither bound nor connected.
+    pub fn new_v6() -> io::Result<TcpSocket> {
+        Self::new(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::UNSPECIFIED,
+            0,
+            0,
+            0,
+        )))
+    }
+
+    /// `domain_addr` is never bound to -- only its `V4`/`V6` variant is
+    /// used, to pick `AF_INET`/`AF_INET6` for the underlying `socket(2)`
+    /// call (the same reason [`TcpStream::connect`] passes its own
+    /// target address through to `socket::new_tcp_socket` before ever
+    /// calling `connect(2)` with it).
+    fn new(domain_addr: SocketAddr) -> io::Result<TcpSocket> {
+        Ok(TcpSocket {
+            fd: socket::new_tcp_socket(domain_addr)?,
+        })
+    }
+
+    /// `SO_REUSEADDR` -- lets a new socket bind to an address still
+    /// lingering in `TIME_WAIT` from a previous listener on the same
+    /// port, instead of failing with `EADDRINUSE`.
+    pub fn set_reuseaddr(&self, reuse: bool) -> io::Result<()> {
+        socket::set_reuseaddr(self.fd.as_raw_fd(), reuse)
+    }
+
+    pub fn reuseaddr(&self) -> io::Result<bool> {
+        socket::reuseaddr(self.fd.as_raw_fd())
+    }
+
+    /// `SO_REUSEPORT` -- lets multiple sockets bind to the exact same
+    /// address *and* port, with the kernel load-balancing incoming
+    /// connections across them (a common multi-process/multi-thread
+    /// listener pattern). Supported on both of this crate's targets.
+    pub fn set_reuseport(&self, reuse: bool) -> io::Result<()> {
+        socket::set_reuseport(self.fd.as_raw_fd(), reuse)
+    }
+
+    pub fn reuseport(&self) -> io::Result<bool> {
+        socket::reuseport(self.fd.as_raw_fd())
+    }
+
+    pub fn set_send_buffer_size(&self, size: u32) -> io::Result<()> {
+        socket::set_send_buffer_size(self.fd.as_raw_fd(), size)
+    }
+
+    /// The kernel doesn't necessarily use exactly the size last
+    /// requested via [`set_send_buffer_size`](Self::set_send_buffer_size)
+    /// (Linux, notably, doubles it) -- read this back to see what was
+    /// actually applied.
+    pub fn send_buffer_size(&self) -> io::Result<u32> {
+        socket::send_buffer_size(self.fd.as_raw_fd())
+    }
+
+    pub fn set_recv_buffer_size(&self, size: u32) -> io::Result<()> {
+        socket::set_recv_buffer_size(self.fd.as_raw_fd(), size)
+    }
+
+    pub fn recv_buffer_size(&self) -> io::Result<u32> {
+        socket::recv_buffer_size(self.fd.as_raw_fd())
+    }
+
+    /// Binds to `addr`. Doesn't start listening yet -- see
+    /// [`listen`](Self::listen), a separate step so options can still be
+    /// set (or read back) on the bound-but-not-yet-listening socket in
+    /// between, matching `bind(2)`/`listen(2)` already being separate
+    /// syscalls at the OS level.
+    pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
+        socket::bind(self.fd.as_raw_fd(), addr)
+    }
+
+    /// Starts listening, turning this into an ordinary [`TcpListener`].
+    /// `backlog` is the OS's pending-connection queue length hint (see
+    /// `listen(2)`).
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
+        socket::listen(self.fd.as_raw_fd(), backlog)?;
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformTcpListener::from(self.fd);
+        // Already non-blocking from `socket::new_tcp_socket` -- this is
+        // a no-op in practice, kept for the same belt-and-suspenders
+        // reason `from_std` sets it explicitly too rather than trusting
+        // the fd's existing state.
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(TcpListener { inner, io, reactor })
+    }
+
+    /// Connects, turning this into an ordinary [`TcpStream`].
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
+        let reactor = Handle::current().shared.reactor.clone();
+        socket::connect(self.fd.as_raw_fd(), addr)?;
+        let io = reactor.register(self.fd.as_raw_fd())?;
+        let inner = PlatformTcpStream::from(self.fd);
+        // A non-blocking connect completes asynchronously; the socket
+        // becoming writable is the signal to check whether it actually
+        // succeeded -- same as `TcpStream::connect`.
+        ready_io(&io, Interest::Write, || {
+            socket::take_socket_error(inner.as_raw_fd())
+        })
+        .await?;
+        Ok(TcpStream { inner, io, reactor })
     }
 }
