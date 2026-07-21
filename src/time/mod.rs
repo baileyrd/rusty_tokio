@@ -237,10 +237,19 @@ pub struct Interval {
 }
 
 pub fn interval(period: Duration) -> Interval {
+    interval_at(Instant::now() + period, period)
+}
+
+/// Like [`interval`], but the first tick fires at `start` instead of
+/// always being derived from `Instant::now() + period` -- useful for
+/// aligning several independent intervals to the same wall-clock
+/// moments, or for making the first tick fire sooner (or later) than a
+/// full period from now.
+pub fn interval_at(start: Instant, period: Duration) -> Interval {
     assert!(period > Duration::ZERO, "interval period must be positive");
     Interval {
         period,
-        next_deadline: Instant::now() + period,
+        next_deadline: start,
         sleep: None,
     }
 }
