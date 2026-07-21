@@ -1,6 +1,6 @@
 //! [`JoinHandle`]: the awaitable, abortable handle returned by `spawn`.
 
-use super::Task;
+use super::{Task, TaskId};
 use std::any::Any;
 use std::fmt;
 use std::future::Future;
@@ -88,6 +88,7 @@ impl<T> JoinInner<T> {
 /// tokio's `JoinHandle`. Use [`JoinHandle::abort`] for that.
 pub struct JoinHandle<T> {
     inner: Arc<JoinInner<T>>,
+    id: TaskId,
     /// A thunk that calls the underlying task's own `abort()`, captured
     /// behind a `Weak` (not an owning reference) so holding a
     /// `JoinHandle` never keeps a finished task's state around longer
@@ -103,8 +104,18 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> JoinHandle<T> {
-    pub(super) fn new(inner: Arc<JoinInner<T>>) -> Self {
-        JoinHandle { inner, abort: None }
+    pub(super) fn new(inner: Arc<JoinInner<T>>, id: TaskId) -> Self {
+        JoinHandle {
+            inner,
+            id,
+            abort: None,
+        }
+    }
+
+    /// This task's stable identity -- unaffected by it completing,
+    /// panicking, or being aborted. See [`TaskId`]'s own docs.
+    pub fn id(&self) -> TaskId {
+        self.id
     }
 
     pub(super) fn with_task(mut self, task: Arc<Task>) -> Self {
