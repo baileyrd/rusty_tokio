@@ -155,6 +155,21 @@ rustils' API can't support them yet.
   pattern, without callers having to reach for `Arc` themselves the way
   the shared `&TcpStream`/`&UnixStream` impls otherwise require.
 
+  Also `AsyncBufRead` (`poll_fill_buf`/`consume`) plus `io::BufReader`/
+  `io::BufWriter`, for buffering on top of any `AsyncRead`/`AsyncWrite` --
+  this crate's own sockets are unbuffered by design, so these are how a
+  protocol that wants to read a line at a time (`AsyncBufReadExt::
+  read_line`/`read_until`/`lines()`) or batch small writes into fewer
+  syscalls adds that itself. Both require the wrapped type to be
+  `Unpin` -- a deliberate simplification versus tokio's own
+  `BufReader`/`BufWriter` (which pin-project through to a possibly-
+  `!Unpin` inner value); every concrete reader/writer this crate
+  actually has is already `Unpin`, so it costs nothing in practice while
+  avoiding hand-written unsafe pin projection for a case that would
+  never exercise it. `BufWriter` doesn't flush on drop (any
+  not-yet-flushed bytes are silently lost) -- the same caveat tokio's
+  own carries.
+
   **This crate's macOS integration has never run on real hardware.**
   It's developed and tested on Linux only; the kqueue reactor and the
   `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of rustils'

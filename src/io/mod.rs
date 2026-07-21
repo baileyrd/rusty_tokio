@@ -18,6 +18,7 @@
 //! branching.
 
 mod async_io;
+mod buffered;
 #[cfg(feature = "futures-io-compat")]
 mod compat;
 pub(crate) mod reactor;
@@ -26,7 +27,11 @@ mod tcp;
 mod udp;
 mod unix;
 
-pub use async_io::{copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+pub use async_io::{
+    copy, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+    ReadBuf,
+};
+pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
 pub use compat::Compat;
 pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
