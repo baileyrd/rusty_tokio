@@ -130,7 +130,11 @@ rustils' API can't support them yet.
   (once a writer is queued, later readers queue behind it too, rather
   than jumping ahead just because the write lock itself isn't held
   yet -- otherwise constant read traffic could starve a waiting writer
-  indefinitely).
+  indefinitely). Also `Semaphore`: caps concurrency at N permits, fair
+  (FIFO) like tokio's own -- both borrowed (`SemaphorePermit`) and
+  `Arc`-owned (`OwnedSemaphorePermit`, for holding a permit across a
+  spawned task boundary) permit flavors, plus `acquire_many` for
+  reserving more than one permit at once.
 - **`spawn_blocking`**: offloads a genuinely blocking closure onto a
   separate thread pool that grows on demand (up to a configurable cap)
   and shrinks back down when idle, instead of stalling an async worker

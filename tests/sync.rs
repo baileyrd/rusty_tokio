@@ -1,4 +1,4 @@
-use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
+use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock, Semaphore};
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -149,6 +149,106 @@ fn rwlock_try_read_and_try_write() {
         lock.try_read().is_none(),
         "try_read should fail while the writer is held"
     );
+}
+
+#[test]
+fn semaphore_caps_concurrency_at_the_configured_permit_count() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let semaphore = Arc::new(Semaphore::new(3));
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..12 {
+            let semaphore = semaphore.clone();
+            let concurrent = concurrent.clone();
+            let max_concurrent = max_concurrent.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
+                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    assert_eq!(
+        max_concurrent.load(Ordering::SeqCst),
+        3,
+        "concurrency should reach but never exceed the permit count"
+    );
+    assert_eq!(semaphore.available_permits(), 3);
+}
+
+#[test]
+fn semaphore_grants_queued_waiters_in_fifo_order() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let semaphore = Arc::new(Semaphore::new(1));
+    let order: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    rt.block_on(async {
+        let held = semaphore.acquire().await; // exhaust the single permit
+
+        let mut handles = Vec::new();
+        for i in 0..5u32 {
+            let semaphore = semaphore.clone();
+            let order = order.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
+                order.lock().unwrap().push(i);
+            }));
+            // Give each task a real chance to actually queue, in order,
+            // before the next one is spawned.
+            rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        drop(held); // let the queue start draining
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn semaphore_acquire_many_reserves_all_requested_permits_at_once() {
+    let rt = Runtime::new().unwrap();
+    let semaphore = Semaphore::new(3);
+    rt.block_on(async {
+        let permit = semaphore.acquire_many(2).await;
+        assert_eq!(semaphore.available_permits(), 1);
+        drop(permit);
+        assert_eq!(semaphore.available_permits(), 3);
+    });
+}
+
+#[test]
+fn semaphore_try_acquire_fails_when_not_enough_permits_are_free() {
+    let semaphore = Semaphore::new(1);
+    let _held = semaphore.try_acquire().unwrap();
+    assert!(semaphore.try_acquire().is_none());
+}
+
+#[test]
+fn semaphore_owned_permit_moves_into_a_spawned_task() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await;
+        let handle = rusty_tokio::spawn(async move {
+            // Holding the only permit here, moved in from outside --
+            // the point of `acquire_owned` over the borrowed form.
+            drop(permit);
+        });
+        handle.await.unwrap();
+        assert_eq!(semaphore.available_permits(), 1);
+    });
 }
 
 #[test]
