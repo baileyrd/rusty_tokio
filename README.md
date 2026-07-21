@@ -211,7 +211,14 @@ edges instead of papering over them:
   `futures-io`'s.** Same shape, so generic code within this project works
   the same way, but a third-party codec/framing crate built against
   tokio's actual trait won't accept this crate's `TcpStream` without a
-  shim.
+  shim. The optional `futures-io-compat` feature (off by default) adds
+  one for `futures-io` specifically -- `rusty_tokio::io::Compat::new(x)`
+  wraps anything implementing this crate's own `AsyncRead`/`AsyncWrite`
+  so it also implements `futures_io`'s traits of the same name, for
+  codec/framing crates that target `futures-io` directly or
+  transitively. No equivalent exists for tokio's own traits: doing that
+  properly would mean depending on tokio itself, which this crate
+  otherwise avoids entirely (see the top of this README).
 - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
   Correct and simple; a real lock-free Chase-Lev deque (what tokio
   itself uses) would scale better under heavy contention.
@@ -225,6 +232,10 @@ cargo test      # unit tests for the task state machine, plus integration
                 # TCP/UDP over the real reactor, and every sync primitive
 cargo clippy --all-targets
 cargo bench     # timer skew/drift/churn measurements -- see "Timers" above
+
+# The futures-io compat shim (off by default -- see "What's deliberately
+# not here" below) has its own feature-gated test target:
+cargo test --features futures-io-compat
 
 # This crate's macOS reactor integration: compiles and type-checks, but
 # nothing beyond that -- see the macOS caveat above.

@@ -56,7 +56,15 @@
 //!   not tokio's or `futures-io`'s.** Shaped the same way (`Pin<&mut
 //!   Self>`, `poll_*` methods) so generic code here works the same way,
 //!   but a third-party codec/framing crate built against tokio's actual
-//!   trait won't accept this crate's `TcpStream` without a shim.
+//!   trait won't accept this crate's `TcpStream` without a shim. The
+//!   optional `futures-io-compat` feature adds one for `futures-io`
+//!   specifically (`io::Compat`, only present when that feature is
+//!   enabled, hence not linked directly from these crate-level docs,
+//!   which build regardless) -- a small, stable crate several
+//!   codec/framing crates target directly or transitively, chosen over
+//!   pulling in all of tokio just for its I/O trait definitions. No
+//!   equivalent shim for tokio's own traits exists (or is planned) --
+//!   that really would mean depending on tokio.
 //! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
 //!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
 //!   actually uses) would scale better under heavy contention.

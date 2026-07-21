@@ -15,6 +15,20 @@ libc = "0.2"
 # crate instance (mixing revs would make e.g. `platform::error::
 # PlatformError` from one checkout a different type than from another).
 platform = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+# Optional (see the `futures-io-compat` feature below): a small, stable,
+# widely-depended-on crate that exists specifically to let unrelated
+# async I/O implementations interoperate -- issue #7's second option,
+# preferred over pulling in all of tokio just for its I/O traits.
+futures-io = { version = "0.3", optional = true }
+
+[features]
+# Implements `futures_io::{AsyncRead, AsyncWrite}` for a `Compat<T>`
+# wrapper around anything implementing this crate's own traits (see
+# `io::compat`'s docs) -- lets third-party codec/framing crates written
+# against `futures-io` (or, transitively, anything built on it) accept
+# this crate's `TcpStream`/`UnixStream`/etc. Off by default so the
+# `futures-io` dependency is never pulled in unless asked for.
+futures-io-compat = ["dep:futures-io"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
@@ -22,9 +36,20 @@ platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
 
+[dev-dependencies]
+# Unconditional here (unlike the optional `[dependencies]` entry above)
+# so `tests/futures_io_compat.rs` can call the trait's methods directly
+# -- `required-features` below still skips building that one test
+# target unless the `futures-io-compat` feature is actually enabled.
+futures-io = "0.3"
+
 [profile.release]
 debug = true
 
 [[bench]]
 name = "timers"
 harness = false
+
+[[test]]
+name = "futures_io_compat"
+required-features = ["futures-io-compat"]
