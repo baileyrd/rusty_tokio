@@ -137,7 +137,16 @@
 //!   `OnceCell`, `oneshot`, `watch`, bounded/unbounded `mpsc`, and
 //!   `broadcast` (every receiver gets every message, reporting `Lagged`
 //!   if one falls behind) -- the primitives above are usually enough to
-//!   build everything else on top of.
+//!   build everything else on top of. Also [`sync::Barrier`]: a
+//!   rendezvous point for a fixed number of tasks, reusable across many
+//!   rounds -- every `wait()` call blocks until `n` of them have all
+//!   called it, then all resolve together, one arbitrarily marked the
+//!   round's "leader". Hand-rolls its own waiter list behind one lock
+//!   (rather than building on `Notify`, whose own waiters queue lives
+//!   behind a *separate* lock from whatever a caller checks first) so
+//!   there's no window for a round to complete between a waiter
+//!   checking it hasn't yet and registering to be woken -- see that
+//!   module's own docs for the two-lock race this sidesteps.
 //! - [`select!`]: race two to five futures, running whichever resolves
 //!   first and dropping the rest -- see that macro's own docs for
 //!   exactly what's (and isn't) supported.
