@@ -4,7 +4,7 @@ use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -66,6 +66,48 @@ impl TcpListener {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr().map_err(from_platform_err)
+    }
+
+    /// Adopts an already-bound-and-listening `std` listener -- e.g. one
+    /// received from a supervisor process, or set up with `socket2` for
+    /// an option this crate doesn't expose a wrapper for (`SO_REUSEPORT`
+    /// load-balancing, and the like). Flips it non-blocking and
+    /// registers it with the reactor without redoing the bind/listen
+    /// syscalls.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn from_std(listener: std::net::TcpListener) -> io::Result<TcpListener> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformTcpListener::from(OwnedFd::from(listener));
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(TcpListener { inner, io, reactor })
+    }
+
+    /// The reverse of [`from_std`](Self::from_std): hands this listener
+    /// back out as a plain blocking `std::net::TcpListener`, flipped back
+    /// to blocking first (matching tokio's own documented behavior --
+    /// the returned socket is *not* left non-blocking).
+    ///
+    /// Duplicates the underlying fd (`dup(2)`, via `try_clone_to_owned`)
+    /// rather than transferring the exact same one -- a deliberate
+    /// simplification: `self` still drops normally at the end of this
+    /// call (deregistering from the reactor and closing its own,
+    /// original fd, same as ever), and the returned `std` socket is an
+    /// independent fd referring to the same underlying open file
+    /// description, the same guarantee `TcpStream::try_clone` already
+    /// relies on elsewhere in the standard library -- closing one side
+    /// doesn't affect the other. Costs one extra syscall versus
+    /// transferring ownership of the original fd directly; not worth the
+    /// additional unsafe code that would take to do soundly for how
+    /// rarely this is called.
+    pub fn into_std(self) -> io::Result<std::net::TcpListener> {
+        self.inner
+            .set_nonblocking(false)
+            .map_err(from_platform_err)?;
+        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        Ok(std::net::TcpListener::from(owned))
     }
 }
 
@@ -131,6 +173,33 @@ impl TcpStream {
         })
         .await?;
         Ok(TcpStream { inner, io, reactor })
+    }
+
+    /// Adopts an already-connected `std` stream -- e.g. one received
+    /// from a supervisor process, or configured with `socket2` for an
+    /// option this crate doesn't expose a wrapper for. Flips it
+    /// non-blocking and registers it with the reactor without redoing
+    /// the connect syscall.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformTcpStream::from(OwnedFd::from(stream));
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(TcpStream { inner, io, reactor })
+    }
+
+    /// The reverse of [`from_std`](Self::from_std) -- see
+    /// [`TcpListener::into_std`] for the flip-to-blocking/`dup(2)`
+    /// reasoning, identical here.
+    pub fn into_std(self) -> io::Result<std::net::TcpStream> {
+        self.inner
+            .set_nonblocking(false)
+            .map_err(from_platform_err)?;
+        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        Ok(std::net::TcpStream::from(owned))
     }
 
     fn from_accepted(inner: PlatformTcpStream, reactor: Arc<Reactor>) -> io::Result<TcpStream> {

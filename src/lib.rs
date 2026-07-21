@@ -57,6 +57,11 @@
 //!   proxy/relay use case that needs both directions of an `AsyncRead +
 //!   AsyncWrite` pair copied concurrently from one future, each shutting
 //!   its writer down independently as soon as its own reader hits EOF.
+//!   `TcpListener`/`TcpStream`/`UdpSocket` each have `from_std`/
+//!   `into_std` too, for adopting an already-created `std` socket (from
+//!   a supervisor process, a `socket2`-configured option this crate has
+//!   no wrapper for, ...) or handing one back out as a plain blocking
+//!   socket.
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
