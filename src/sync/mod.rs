@@ -2,6 +2,7 @@
 //! *task* while waiting, rather than blocking the worker thread the way
 //! `std::sync` equivalents do.
 
+pub mod broadcast;
 pub mod mpsc;
 pub mod oneshot;
 pub mod watch;
