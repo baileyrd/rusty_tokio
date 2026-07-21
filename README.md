@@ -308,6 +308,20 @@ rustils' API can't support them yet.
   duration, not just the underlying syscall. Together, no two concurrent
   logical writes to the same stream can interleave, regardless of how
   many syscalls `write_all` itself ends up needing.
+- **In-memory duplex pipe** (`io::duplex(max_buf_size)`): a connected
+  pair of `DuplexStream`s, backed by two mutex-guarded byte buffers (one
+  per direction) with no socket, fd, or reactor registration at all --
+  closer in shape to `sync::mpsc` than to `TcpStream`. A write blocks
+  (returns `Pending`) once the peer's read-side buffer is full, a read
+  blocks once it's empty, the same backpressure a bounded `mpsc` channel
+  has. Useful for testing anything generic over `AsyncRead`/`AsyncWrite`
+  without standing up a real loopback `TcpListener`/`TcpStream` pair just
+  to exercise protocol logic that isn't actually testing networking.
+  Dropping (or `shutdown`-ing) one side marks its write direction closed,
+  so the peer's reads drain whatever's left and then see EOF -- and
+  marks its own read direction gone, so the peer's writes fail fast
+  (`BrokenPipe`) instead of endlessly buffering into a pipe nobody's left
+  to drain.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
