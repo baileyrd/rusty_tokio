@@ -90,6 +90,26 @@ pub struct UnixStream {
 }
 
 impl UnixStream {
+    /// Splits into borrowed read/write halves -- see
+    /// [`super::TcpStream::split`], whose reasoning and implementation
+    /// this mirrors exactly (just over `&UnixStream` instead of
+    /// `&TcpStream`). Named `UnixReadHalf`/`UnixWriteHalf` rather than
+    /// plain `ReadHalf`/`WriteHalf` only because both this module and
+    /// `tcp.rs` are flattened into `io`'s own namespace (`pub use
+    /// tcp::{ReadHalf, ...}` and `pub use unix::{...}` side by side) --
+    /// reusing the exact same names here would collide.
+    pub fn split(&mut self) -> (UnixReadHalf<'_>, UnixWriteHalf<'_>) {
+        (UnixReadHalf(self), UnixWriteHalf(self))
+    }
+
+    /// Splits into owned read/write halves -- see
+    /// [`super::TcpStream::into_split`], whose reasoning and
+    /// implementation this mirrors exactly.
+    pub fn into_split(self) -> (OwnedUnixReadHalf, OwnedUnixWriteHalf) {
+        let inner = Arc::new(self);
+        (OwnedUnixReadHalf(inner.clone()), OwnedUnixWriteHalf(inner))
+    }
+
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub async fn connect(path: &Path) -> io::Result<UnixStream> {
@@ -235,5 +255,67 @@ impl AsyncWrite for UnixStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut &*self.get_mut()).poll_shutdown(cx)
+    }
+}
+
+/// Borrowed read half of a [`UnixStream`], created by [`UnixStream::split`].
+pub struct UnixReadHalf<'a>(&'a UnixStream);
+
+/// Borrowed write half of a [`UnixStream`], created by [`UnixStream::split`].
+pub struct UnixWriteHalf<'a>(&'a UnixStream);
+
+impl AsyncRead for UnixReadHalf<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for UnixWriteHalf<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// Owned read half of a [`UnixStream`], created by
+/// [`UnixStream::into_split`].
+pub struct OwnedUnixReadHalf(Arc<UnixStream>);
+
+/// Owned write half of a [`UnixStream`], created by
+/// [`UnixStream::into_split`].
+pub struct OwnedUnixWriteHalf(Arc<UnixStream>);
+
+impl AsyncRead for OwnedUnixReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for OwnedUnixWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &*self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.get_mut().0).poll_shutdown(cx)
     }
 }
