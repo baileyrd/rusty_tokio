@@ -108,6 +108,15 @@ impl Handle {
     pub(crate) fn is_current_thread(&self) -> bool {
         self.shared.is_current_thread()
     }
+
+    /// A live view into this runtime's scheduler and blocking pool --
+    /// queue depths, steal/park counts per worker, blocking-pool thread
+    /// count. See [`super::RuntimeMetrics`] for what's on it.
+    pub fn metrics(&self) -> super::RuntimeMetrics {
+        super::RuntimeMetrics {
+            shared: self.shared.clone(),
+        }
+    }
 }
 
 /// Installs `handle` as the ambient runtime for as long as the guard

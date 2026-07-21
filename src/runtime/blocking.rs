@@ -46,6 +46,12 @@ impl BlockingPool {
         self.grow_if_needed();
     }
 
+    /// How many blocking-pool OS threads are currently alive -- backs
+    /// [`super::RuntimeMetrics::num_blocking_threads`].
+    pub(crate) fn live_threads(&self) -> usize {
+        self.inner.live_threads.load(Ordering::Acquire)
+    }
+
     /// Adds one more worker thread if the pool is under its cap. Called
     /// on every `spawn`, so it may occasionally add a thread that turns
     /// out not to be needed (another idle thread picks up the job

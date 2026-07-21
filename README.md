@@ -130,6 +130,24 @@ rustils' API can't support them yet.
   `shutdown_notified()` against a task's own ongoing work (rather than
   awaiting it as the task's entire body) can now be done with `select!`
   -- see below.
+- **Runtime metrics** (`Runtime::metrics()`/`Handle::metrics()` ->
+  `RuntimeMetrics`): a live, read-only view into the scheduler and
+  blocking pool -- `num_workers`, `num_alive_tasks`, `global_queue_depth`,
+  per-worker `worker_local_queue_depth`/`worker_steal_count`/
+  `worker_park_count`, and `num_blocking_threads`. `benches/scheduler.rs`
+  and `benches/timers.rs` (issues #8/#13) had to measure contention and
+  skew indirectly, through wall-clock timing of the public API, precisely
+  because none of this was exposed directly before -- this is a live
+  view, not a snapshot frozen at the time `metrics()` was called: every
+  method re-reads the current value, each a plain atomic load (or a
+  queue's own `Mutex::lock`, already taken on every schedule/steal
+  regardless of whether metrics are ever read). Unlike tokio, none of
+  this sits behind an `unstable` feature flag -- the actual cost this
+  adds on the hot scheduling path is a handful of relaxed
+  `AtomicU64::fetch_add` calls at each steal/park site, alongside the
+  `active_tasks` counter that already existed (added for graceful
+  shutdown, above); not the kind of hot-path cost that justifies
+  withholding it by default.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
   `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
   backends behind the same interface

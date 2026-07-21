@@ -44,7 +44,13 @@
 //!   shutdown_notified`/`is_shutting_down` give spawned tasks a real
 //!   chance to observe shutdown and clean up (flush a buffer, close a
 //!   file) before teardown, rather than just being abandoned mid-poll
-//!   the way plain `drop(runtime)` still does.
+//!   the way plain `drop(runtime)` still does. Also [`RuntimeMetrics`]
+//!   (`Runtime::metrics`/`Handle::metrics`): a live, read-only view into
+//!   queue depths, per-worker steal/park counts, and blocking-pool
+//!   thread count, so answering "how busy is this worker" or "is the
+//!   pool starved" no longer means inferring it indirectly through
+//!   wall-clock timing of the public API the way `benches/scheduler.rs`/
+//!   `benches/timers.rs` (issues #8/#13) had to.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
 //!   `UnixStream` / `UnixListener`, an `AsyncRead`/`AsyncWrite` trait
@@ -164,7 +170,7 @@ pub mod time;
 mod macros;
 mod runtime;
 
-pub use runtime::{Builder, Handle, Runtime};
+pub use runtime::{Builder, Handle, Runtime, RuntimeMetrics};
 pub use rusty_tokio_macros::{main, test};
 pub use task::{JoinError, JoinHandle};
 
