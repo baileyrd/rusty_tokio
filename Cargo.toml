@@ -24,3 +24,7 @@ platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b
 
 [profile.release]
 debug = true
+
+[[bench]]
+name = "timers"
+harness = false
