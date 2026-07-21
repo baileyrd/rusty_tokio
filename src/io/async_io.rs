@@ -290,6 +290,122 @@ pub trait AsyncWriteExt: AsyncWrite {
 
 impl<T: AsyncWrite + ?Sized> AsyncWriteExt for T {}
 
+/// A reader with an internal buffer, letting callers ask for "whatever's
+/// available right now" (`poll_fill_buf`) and consume it incrementally
+/// (`consume`) instead of only ever reading into a caller-provided
+/// buffer -- what [`AsyncBufReadExt::read_line`]/[`read_until`]/[`lines`]
+/// are built on. Implemented by [`super::buffered::BufReader`] for any
+/// [`AsyncRead`]; this crate's sockets don't implement it directly, the
+/// same way they're unbuffered `AsyncWrite`rs (see that trait's
+/// `poll_flush` docs).
+///
+/// [`read_line`]: AsyncBufReadExt::read_line
+/// [`read_until`]: AsyncBufReadExt::read_until
+/// [`lines`]: AsyncBufReadExt::lines
+pub trait AsyncBufRead: AsyncRead {
+    /// Returns the reader's internal buffer, filling it first with at
+    /// least one more byte if it's currently empty (unless already at
+    /// EOF, in which case an empty slice is returned). The returned
+    /// bytes aren't actually removed until [`consume`](Self::consume)
+    /// says how many of them were used.
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>>;
+
+    /// Marks `amt` bytes, previously returned by
+    /// [`poll_fill_buf`](Self::poll_fill_buf), as consumed -- they won't
+    /// be returned by a later `poll_fill_buf` call again.
+    fn consume(self: Pin<&mut Self>, amt: usize);
+}
+
+/// Provided conveniences over [`AsyncBufRead`]'s `poll_*` methods.
+/// Blanket-implemented for every `AsyncBufRead`. See [`AsyncReadExt`]'s
+/// docs for why these are `-> impl Future + Send` instead of `async fn`.
+pub trait AsyncBufReadExt: AsyncBufRead {
+    /// Reads bytes into `buf` until `byte` is seen (inclusive) or EOF,
+    /// returning the number of bytes appended. `buf` is *not* cleared
+    /// first -- bytes are appended to whatever's already there, the
+    /// same as `std::io::BufRead::read_until`.
+    fn read_until<'a>(
+        &'a mut self,
+        byte: u8,
+        buf: &'a mut Vec<u8>,
+    ) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let mut total = 0;
+            loop {
+                // Does the scan-and-extend work *inside* the `poll_fn`
+                // closure itself, returning only owned `(bool, usize)`
+                // data -- `poll_fill_buf`'s returned `&[u8]` borrows
+                // from `self`, and a plain `FnMut` closure passed to
+                // `poll_fn` can't return a reference borrowed from its
+                // own captures (the closure's signature has no way to
+                // tie that borrow's lifetime to one specific call).
+                let (done, used) = std::future::poll_fn(|cx| {
+                    let available = match Pin::new(&mut *self).poll_fill_buf(cx) {
+                        Poll::Ready(Ok(available)) => available,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    };
+                    let outcome = match available.iter().position(|&b| b == byte) {
+                        Some(i) => {
+                            buf.extend_from_slice(&available[..=i]);
+                            (true, i + 1)
+                        }
+                        None => {
+                            buf.extend_from_slice(available);
+                            (false, available.len())
+                        }
+                    };
+                    Poll::Ready(Ok(outcome))
+                })
+                .await?;
+                Pin::new(&mut *self).consume(used);
+                total += used;
+                if done || used == 0 {
+                    return Ok(total);
+                }
+            }
+        }
+    }
+
+    /// Reads one line (including the trailing `\n`, if any) into `buf`,
+    /// appended -- not cleared first, same as [`read_until`](Self::read_until).
+    /// Fails with `InvalidData` (without modifying `buf`) if the bytes
+    /// read aren't valid UTF-8.
+    fn read_line(&mut self, buf: &mut String) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let mut bytes = Vec::new();
+            let n = self.read_until(b'\n', &mut bytes).await?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )
+            })?;
+            buf.push_str(&text);
+            Ok(n)
+        }
+    }
+
+    /// An iterator-like helper yielding one line at a time (via
+    /// `lines.next_line().await`), with the trailing `\n`/`\r\n`
+    /// stripped -- not a `Stream` impl, since this crate has no
+    /// `futures-core` dependency to implement that trait against.
+    fn lines(self) -> super::buffered::Lines<Self>
+    where
+        Self: Sized,
+    {
+        super::buffered::Lines::new(self)
+    }
+}
+
+impl<T: AsyncBufRead + ?Sized> AsyncBufReadExt for T {}
+
 /// An in-memory sink -- never blocks, so every operation is trivially
 /// `Ready`. Handy as a `copy`/`AsyncWriteExt` target in tests, or any
 /// code that wants to build a byte stream without a real socket.

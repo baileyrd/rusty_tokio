@@ -47,8 +47,13 @@
 //!   the way plain `drop(runtime)` still does.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
-//!   `UnixStream` / `UnixListener`, and an `AsyncRead`/`AsyncWrite` trait
-//!   pair for generic code (`copy`, codecs, adapters).
+//!   `UnixStream` / `UnixListener`, an `AsyncRead`/`AsyncWrite` trait
+//!   pair for generic code (`copy`, codecs, adapters), and
+//!   `AsyncBufRead`/`io::BufReader`/`io::BufWriter` for buffering on top
+//!   of any of the above -- this crate's own sockets are unbuffered by
+//!   design (see `AsyncWrite::poll_flush`'s docs), so these are how a
+//!   protocol that wants to read a line at a time or batch small writes
+//!   adds that itself.
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
