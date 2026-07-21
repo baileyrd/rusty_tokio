@@ -99,7 +99,17 @@
 //!   buffers with backpressure (a write blocks once the peer's read side
 //!   is full) -- for testing anything generic over `AsyncRead`/
 //!   `AsyncWrite` without standing up a real loopback `TcpListener`/
-//!   `TcpStream` pair.
+//!   `TcpStream` pair. And [`io::TcpSocket`]: `TcpListener::bind`/
+//!   `TcpStream::connect` go straight from nothing to bound-and-
+//!   listening/connected in one call, with no opportunity to set a
+//!   socket option (`SO_REUSEADDR`, `SO_REUSEPORT`, send/receive buffer
+//!   sizes) in between -- `TcpSocket::new_v4`/`new_v6` is a bare,
+//!   unbound, unconnected staging point for exactly that, `bind`/
+//!   `listen`/`connect` turning it into an ordinary `TcpListener`/
+//!   `TcpStream` once configured. None of those four options are in
+//!   rustils' own `TcpStream`/`TcpListener` traits, so each is a
+//!   hand-rolled `setsockopt`/`getsockopt` call, the same treatment
+//!   `socket/mod.rs`'s other slivers of raw `libc` already get.
 //! - [`fs`]: [`fs::File`], the only type here so far. A regular file
 //!   can't be registered with a reactor's readiness model the way a
 //!   socket can -- the kernel considers it always "ready", and the real

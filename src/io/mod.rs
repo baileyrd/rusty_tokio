@@ -38,7 +38,9 @@ pub use buffered::{BufReader, BufWriter, Lines};
 pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
-pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
+pub use tcp::{
+    OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpSocket, TcpStream, WriteHalf,
+};
 pub use udp::UdpSocket;
 pub use unix::{
     OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixStream, UnixWriteHalf,

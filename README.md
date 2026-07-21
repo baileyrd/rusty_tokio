@@ -322,6 +322,22 @@ rustils' API can't support them yet.
   marks its own read direction gone, so the peer's writes fail fast
   (`BrokenPipe`) instead of endlessly buffering into a pipe nobody's left
   to drain.
+- **`TcpSocket` builder** (`io::TcpSocket`): `TcpListener::bind`/
+  `TcpStream::connect` go straight from nothing to bound-and-listening/
+  connected in one call, with no opportunity to set a socket option in
+  between. `TcpSocket::new_v4()`/`new_v6()` creates a bare, unbound,
+  unconnected socket first; `set_reuseaddr`/`set_reuseport`/
+  `set_send_buffer_size`/`set_recv_buffer_size` (each with a matching
+  getter) configure it; `bind`/`listen` or `connect` then turns it into
+  an ordinary `TcpListener`/`TcpStream`, same as ever from that point on.
+  None of those four options are in rustils' own `TcpStream`/
+  `TcpListener` traits (only `set_nodelay` is), so each is a hand-rolled
+  `setsockopt`/`getsockopt` call in `socket/mod.rs`, alongside the
+  non-blocking `connect` and `getsockopt(SO_ERROR)` slivers already
+  there. `bind`/`listen` are hand-rolled too, as two separate syscalls --
+  rustils' own `TcpListener::bind` only exposes the combined "bind and
+  immediately listen" operation, which wouldn't leave room to configure
+  the socket in between.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
