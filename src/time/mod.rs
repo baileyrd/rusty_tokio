@@ -227,13 +227,40 @@ impl<F: Future> Future for Timeout<F> {
     }
 }
 
+/// What [`Interval::tick`] does when one or more ticks were missed --
+/// the caller didn't call `tick()` again until after more than one
+/// `period` had already elapsed since the last one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissedTickBehavior {
+    /// Keep the original schedule and fire every missed tick back-to-
+    /// back with no delay between them until caught up -- the default,
+    /// and this type's behavior before `MissedTickBehavior` existed.
+    /// Next deadline is always the previous scheduled deadline plus one
+    /// period, regardless of how late `tick()` was actually called.
+    #[default]
+    Burst,
+    /// Give up on the original schedule and restart it from whenever
+    /// this (late) tick actually fired: next deadline is `Instant::now()
+    /// + period`, measured at the moment the missed tick is finally
+    /// observed, not `period` after the original schedule.
+    Delay,
+    /// Neither burst through nor delay-and-reset: jump straight to the
+    /// next deadline that's still in the future, skipping every tick
+    /// that was missed without firing any of them.
+    Skip,
+}
+
 /// Fires repeatedly on a fixed period, measured from the *previous
 /// scheduled* tick (not from when `tick()` returned) so ticks don't
-/// drift under load the way `sleep(period)` in a loop would.
+/// drift under load the way `sleep(period)` in a loop would -- see
+/// [`MissedTickBehavior`] for exactly what "measured from" means once a
+/// tick has actually been missed, which the three variants there each
+/// treat differently.
 pub struct Interval {
     period: Duration,
     next_deadline: Instant,
     sleep: Option<Sleep>,
+    missed_tick_behavior: MissedTickBehavior,
 }
 
 pub fn interval(period: Duration) -> Interval {
@@ -251,10 +278,19 @@ pub fn interval_at(start: Instant, period: Duration) -> Interval {
         period,
         next_deadline: start,
         sleep: None,
+        missed_tick_behavior: MissedTickBehavior::default(),
     }
 }
 
 impl Interval {
+    pub fn missed_tick_behavior(&self) -> MissedTickBehavior {
+        self.missed_tick_behavior
+    }
+
+    pub fn set_missed_tick_behavior(&mut self, behavior: MissedTickBehavior) {
+        self.missed_tick_behavior = behavior;
+    }
+
     /// Waits for the next tick, returning the `Instant` it was
     /// scheduled for.
     pub async fn tick(&mut self) -> Instant {
@@ -265,7 +301,18 @@ impl Interval {
             match Pin::new(sleep).poll(cx) {
                 Poll::Ready(()) => {
                     let fired_at = self.next_deadline;
-                    self.next_deadline += self.period;
+                    self.next_deadline = match self.missed_tick_behavior {
+                        MissedTickBehavior::Burst => self.next_deadline + self.period,
+                        MissedTickBehavior::Delay => Instant::now() + self.period,
+                        MissedTickBehavior::Skip => {
+                            let now = Instant::now();
+                            let mut next = self.next_deadline + self.period;
+                            while next <= now {
+                                next += self.period;
+                            }
+                            next
+                        }
+                    };
                     self.sleep = None;
                     Poll::Ready(fired_at)
                 }

@@ -92,8 +92,14 @@ rustils' API can't support them yet.
   solid, but this crate's own reactor integration on top of it is still
   reviewed-but-unverified until someone actually runs *this* crate's
   `cargo test` on a Mac.
-- **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, and `interval`,
-  backed by a single background thread holding a min-heap of deadlines.
+- **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
+  `interval_at` (like `interval`, but the first tick fires at a given
+  `Instant` instead of always `now + period`), backed by a single
+  background thread holding a min-heap of deadlines. `Interval` also has
+  `MissedTickBehavior` (`Burst` -- the default, and this crate's
+  original unconditional behavior -- `Delay`, or `Skip`), for choosing
+  what happens when a tick isn't collected before more than one period
+  has already elapsed.
   `benches/timers.rs` (`cargo bench`, no `criterion` -- a plain
   `harness = false` binary that times things by hand) measures this
   rather than assuming it: on the Linux dev box this was built on, a
