@@ -75,7 +75,12 @@ rustils' API can't support them yet.
   tokio's/`futures-io`'s -- `Pin<&mut Self>`, `poll_*` methods -- but
   this crate's own definitions, not a re-export) plus a generic `copy`,
   so code doesn't need to be written against the concrete `TcpStream`
-  type. `TcpStream::split`/`into_split` (and, identically,
+  type. `AsyncReadExt` also has `read_to_end`/`read_to_string`
+  (accumulate until EOF, the latter checking UTF-8 validity once at the
+  end), and `AsyncWrite` has a `poll_write_vectored`/`is_write_vectored`
+  pair (default: writes just the first non-empty buffer via `poll_write`
+  and ignores the rest -- correct, just not the syscall-count win a real
+  `writev`-backed override would be). `TcpStream::split`/`into_split` (and, identically,
   `UnixStream::split`/`into_split`) give borrowed (`ReadHalf`/
   `WriteHalf`, or `UnixReadHalf`/`UnixWriteHalf`) or owned, independently
   `'static` (`OwnedReadHalf`/`OwnedWriteHalf`, or `OwnedUnixReadHalf`/
