@@ -84,7 +84,16 @@
 //!   no wrapper for, ...) or handing one back out as a plain blocking
 //!   socket. Also [`io::AsyncSeek`], seeking within a stream -- only
 //!   meaningful for a file, not a socket, so nothing in this module
-//!   implements it; [`fs::File`] (below) does.
+//!   implements it; [`fs::File`] (below) does. And
+//!   [`io::stdin`]/[`io::stdout`]/[`io::stderr`]: like `fs::File`, these
+//!   are a [`spawn_blocking`] abstraction rather than reactor-driven
+//!   (stdio generally can't be registered with a reactor either), and
+//!   every `Stdout`/`Stderr` write is serialized through a process-wide
+//!   lock (one each, independent of each other) so concurrent writers
+//!   from different tasks can't interleave mid-message -- see
+//!   `io::stdio`'s own module docs for the two-part fix (an internal
+//!   `write_all`, never a partial write, plus the lock held for each
+//!   call's entire duration) and why the fix needs both halves together.
 //! - [`fs`]: [`fs::File`], the only type here so far. A regular file
 //!   can't be registered with a reactor's readiness model the way a
 //!   socket can -- the kernel considers it always "ready", and the real
