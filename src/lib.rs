@@ -5,7 +5,7 @@
 //! `platform`/`platform-linux`/`platform-macos` crates rather than
 //! reimplementing sockaddr packing and syscall error mapping a second
 //! time -- see the crate README's "Built on rustils" section for
-//! exactly which seam that is. It has six pieces, one module each:
+//! exactly which seam that is. It has seven pieces, one module each:
 //!
 //! - [`task`]: a heap-allocated future plus an atomic state machine
 //!   that decides, on every wake, whether to (re-)enqueue it -- see
@@ -145,6 +145,16 @@
 //!   rustils exposes anything pollable for exit (a `pidfd` on Linux, or
 //!   `kevent`'s `EVFILT_PROC` on macOS, would each need their own
 //!   from-scratch reactor integration).
+//! - [`signal`]: [`signal::ctrl_c`] resolves once on the next `SIGINT`;
+//!   [`signal::signal`] returns a [`signal::Signal`] that fires every
+//!   time a given [`signal::SignalKind`] arrives, for as long as it's
+//!   held. Built on the self-pipe trick -- the actual OS signal handler
+//!   only ever does an async-signal-safe `write(2)` to a pre-created
+//!   pipe, with everything else (tracking which listeners care, waking
+//!   them) happening later in an ordinary spawned task reading that pipe
+//!   through the same reactor every socket in this crate uses -- see
+//!   that module's own docs for the full reasoning, including why its
+//!   state is process-wide rather than per-`Runtime`.
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`. On a [`Builder::new_current_thread`]
 //!   runtime, [`time::pause`]/[`time::resume`]/[`time::advance`] swap in
@@ -251,6 +261,7 @@
 pub mod fs;
 pub mod io;
 pub mod process;
+pub mod signal;
 pub mod sync;
 pub mod task;
 pub mod time;

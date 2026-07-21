@@ -385,6 +385,27 @@ rustils' API can't support them yet.
   real-hardware verification -- a deliberate simplicity trade-off, not
   a placeholder, consistent with `fs::File`/stdio already choosing this
   same shape for operations a reactor can't drive directly.
+- **Signal handling** (`signal`): `signal::ctrl_c()` resolves once on
+  the next `SIGINT`; `signal::signal(kind)` returns a `Signal` that
+  fires every time that `SignalKind` arrives, for as long as it's held.
+  Uses the self-pipe trick -- a signal handler can only safely call a
+  short, fixed list of async-signal-safe functions (not allocate, not
+  lock a mutex), so the actual OS handler installed via `sigaction` does
+  exactly one thing, an async-signal-safe `write(2)` of the signal
+  number to a pre-created pipe. Everything else -- figuring out which
+  listeners care, waking them -- happens later, in an ordinary spawned
+  task reading the pipe's other end through the same reactor every
+  socket in this crate uses. Each `Signal` coalesces rather than queues
+  (three occurrences before a poll are observed as one `Some(())`, not
+  three, matching how signal delivery already behaves at the OS level),
+  and installation is idempotent and additive: the first call for a
+  given kind installs its `sigaction`, every call (including the first)
+  adds an independent listener, and a kind this crate was never asked
+  about is never touched. This state is process-wide, not per-`Runtime`
+  -- signals are a process-wide concept -- driven by whichever `Runtime`
+  happens to be current at the first `signal`/`ctrl_c` call; see that
+  module's own docs for the (unusual) multiple-`Runtime` caveat this
+  implies.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
