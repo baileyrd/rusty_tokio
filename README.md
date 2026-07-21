@@ -572,6 +572,28 @@ rustils' API can't support them yet.
   `block_on`, from a `spawn_blocking` closure, or on a
   `Builder::new_current_thread()` runtime, which has no worker pool to
   hand work off to in the first place.
+- **`tracing`/`tokio-console` instrumentation** (off-by-default `tracing`
+  Cargo feature): every spawned task gets a `tracing::Span` shaped
+  exactly the way real (unstable, `tokio_unstable`-gated) tokio's own
+  instrumentation shapes it -- verified against `console-subscriber`'s
+  actual source, not guessed: a task registers the moment
+  `console-subscriber` sees a span named `"runtime.spawn"`, reading
+  `kind`/`task.name`/`task.id`/`loc.file`/`loc.line`/`loc.col` off its
+  fields for display, with poll count and busy/idle time coming for free
+  from ordinary span enter/exit (wrapping the spawned future in
+  `tracing::Instrument::instrument` -- a standard, non-console-specific
+  part of the `tracing` crate -- is all that takes). So the real
+  `console-subscriber`/`tokio-console` tool, built against that wire
+  format and not this crate specifically, works against this runtime
+  with zero changes on its end. `spawn_blocking`'s blocking-pool closure
+  gets its own span (matching tokio's own split between a regular task's
+  span and a blocking task's), separate from the ordinary task span its
+  rendezvous wrapper task gets alongside it. Deliberately not attempted:
+  waker clone/drop/self-wake instrumentation and resource/async-op
+  instrumentation for `sync` primitives -- both real parts of tokio's
+  full console support, but both secondary to a task actually showing up
+  at all, per `console-subscriber`'s own task-registration logic; see
+  `task::trace`'s module docs for the full reasoning.
 - **`#[rusty_tokio::main]`/`#[rusty_tokio::test]`**: attribute macros
   rewriting an `async fn` into the `Runtime::new().unwrap().block_on(
   async { .. })` boilerplate every example and test in this crate used

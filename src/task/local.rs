@@ -237,6 +237,7 @@ impl Wake for ParkingWaker {
     }
 }
 
+#[track_caller]
 fn spawn<F>(shared: &Arc<LocalShared>, future: F) -> JoinHandle<F::Output>
 where
     F: Future + 'static,
@@ -249,10 +250,17 @@ where
     let hook_inner = join_inner.clone();
     let hook: LocalAbnormalHook = Box::new(move |outcome| hook_inner.finish_abnormal(outcome));
 
-    let wrapped: LocalBoxFuture = Box::pin(async move {
-        let output = future.await;
-        join_inner.complete(output);
-    });
+    // `()` when the `tracing` feature is off -- see `trace`'s module
+    // docs for why call sites don't need to `#[cfg]` around this.
+    #[allow(clippy::let_unit_value)]
+    let span = super::trace::spawn_span("task", None, id.as_u64());
+    let wrapped: LocalBoxFuture = Box::pin(super::trace::instrument(
+        async move {
+            let output = future.await;
+            join_inner.complete(output);
+        },
+        span,
+    ));
 
     let task = Arc::new(LocalTask {
         id,
@@ -324,6 +332,7 @@ impl Drop for EnterGuard {
 /// # Panics
 /// Panics if called from a thread that isn't currently inside a
 /// `LocalSet::run_until` call.
+#[track_caller]
 pub fn spawn_local<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + 'static,
@@ -379,6 +388,7 @@ impl LocalSet {
     /// # Panics
     /// Panics if called from a different thread than whichever one
     /// first called `spawn_local`/`run_until` on this set.
+    #[track_caller]
     pub fn spawn_local<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,

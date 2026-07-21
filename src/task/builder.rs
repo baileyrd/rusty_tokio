@@ -49,6 +49,7 @@ impl<'a> Builder<'a> {
     /// # Panics
     /// Panics if called from a thread with no ambient runtime -- same as
     /// [`crate::spawn`].
+    #[track_caller]
     pub fn spawn<F>(self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,

@@ -35,6 +35,7 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    #[track_caller]
     pub fn spawn<F>(&self, future: F) -> crate::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
@@ -59,13 +60,26 @@ impl Handle {
     /// closure's OS thread runs to completion regardless -- there's no
     /// way to preempt a blocking syscall), matching tokio's own
     /// `spawn_blocking` semantics.
+    #[track_caller]
     pub fn spawn_blocking<F, T>(&self, f: F) -> crate::task::JoinHandle<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
         let (tx, rx) = crate::sync::oneshot::channel::<std::thread::Result<T>>();
+        // A separate `TaskId`/span from the rendezvous wrapper task
+        // spawned below -- see `task::trace`'s module docs for why
+        // `spawn_blocking` shows up as two independent console entries
+        // rather than one.
+        let blocking_id = crate::task::TaskId::next();
+        // `()` when the `tracing` feature is off -- see `task::trace`'s
+        // module docs for why call sites don't need to `#[cfg]` around
+        // this.
+        #[allow(clippy::let_unit_value)]
+        let span = crate::task::trace::blocking_span(None, blocking_id.as_u64());
         self.shared.blocking_pool.spawn(Box::new(move || {
+            #[allow(clippy::let_unit_value)]
+            let _guard = crate::task::trace::enter(&span);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             let _ = tx.send(result);
         }));

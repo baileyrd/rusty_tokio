@@ -31,6 +31,14 @@ impl TaskId {
     pub(crate) fn next() -> Self {
         TaskId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// The raw numeric ID -- used as the `task.id` field on this task's
+    /// `tracing` span (see `task::trace`) when the `tracing` feature is
+    /// enabled; purely a display value there, not a correlation key.
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
+    pub(crate) fn as_u64(&self) -> u64 {
+        self.0
+    }
 }
 
 impl fmt::Display for TaskId {
