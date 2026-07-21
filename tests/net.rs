@@ -141,3 +141,30 @@ fn udp_send_and_recv() {
         responder.await.unwrap();
     });
 }
+
+#[test]
+fn udp_connect_allows_send_and_recv_without_addressing() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let b_addr = b.local_addr().unwrap();
+
+        a.connect(b_addr).unwrap();
+        b.connect(a_addr).unwrap();
+
+        let responder = rusty_tokio::spawn(async move {
+            let mut buf = [0u8; 32];
+            let n = b.recv(&mut buf).await.unwrap();
+            b.send(&buf[..n]).await.unwrap();
+        });
+
+        a.send(b"ping").await.unwrap();
+        let mut buf = [0u8; 32];
+        let n = a.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        responder.await.unwrap();
+    });
+}
