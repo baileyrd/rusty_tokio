@@ -29,6 +29,29 @@ rustils' API can't support them yet.
   cancel everything at once, and -- unlike a bare `JoinHandle`, which
   never aborts on drop -- dropping the whole set aborts every task still
   in it.
+- **`LocalSet`/`spawn_local`**: a place to spawn `!Send` futures --
+  holding an `Rc`, a `RefCell`-guarded value, or any other non-thread-safe
+  handle -- which `crate::spawn` can never accept, since every task
+  spawned there is an `Arc<Task>` any worker thread may poll.
+  `LocalSet::run_until(future)` drives every task spawned onto the set
+  (via `LocalSet::spawn_local` or the ambient `task::spawn_local`)
+  interleaved with `future`, synchronously, on whichever thread calls
+  it -- the same "blocks until done" contract as `Runtime::block_on`.
+  A `!Send` future still needs a thread-safe `Waker` (the I/O
+  reactor/timer driver wake it from their own background threads, same
+  as any other task), so the local task type is `Arc`-counted with an
+  `unsafe impl Send + Sync` justified by a genuinely enforced invariant,
+  not just a comment: `LocalSet` binds itself to whichever thread first
+  calls `spawn_local`/`run_until` on it and panics if used from a
+  different one afterward, so the actual `!Send` future inside is never
+  touched except on that one thread. Pair a `LocalSet` with a `Runtime`
+  for `time::sleep`/I/O to work inside `spawn_local`'d work (a bare
+  `LocalSet` has no reactor/timer driver of its own, only scheduling);
+  there's no "run this `LocalSet` pinned to one worker of an existing
+  multi-threaded `Runtime`" integration the way tokio's `LocalSet: Future`
+  impl offers, and no graceful-shutdown draining -- a `LocalSet` going
+  out of scope just drops whatever's left queued, same as this crate's
+  `Runtime` already does for tasks abandoned mid-shutdown.
 - **Runtime** (`Runtime`, `Handle`): a fixed pool of worker threads, each
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when

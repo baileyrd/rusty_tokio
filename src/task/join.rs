@@ -5,7 +5,7 @@ use std::any::Any;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 enum JoinState<T> {
@@ -88,16 +88,45 @@ impl<T> JoinInner<T> {
 /// tokio's `JoinHandle`. Use [`JoinHandle::abort`] for that.
 pub struct JoinHandle<T> {
     inner: Arc<JoinInner<T>>,
-    task: Option<Weak<Task>>,
+    /// A thunk that calls the underlying task's own `abort()`, captured
+    /// behind a `Weak` (not an owning reference) so holding a
+    /// `JoinHandle` never keeps a finished task's state around longer
+    /// than it otherwise would be. A closure rather than
+    /// `Option<Weak<Task>>` directly so this same `JoinHandle` type can
+    /// back tasks spawned onto the multi-threaded scheduler's own
+    /// `Task` *or* [`super::local::LocalSet::spawn_local`]'s `LocalTask`
+    /// without either one needing to know about the other -- `T`'s own
+    /// `Send`-ness (or lack of it) still propagates correctly through
+    /// `inner: Arc<JoinInner<T>>` either way, since this closure never
+    /// touches `T` at all.
+    abort: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl<T> JoinHandle<T> {
     pub(super) fn new(inner: Arc<JoinInner<T>>) -> Self {
-        JoinHandle { inner, task: None }
+        JoinHandle { inner, abort: None }
     }
 
     pub(super) fn with_task(mut self, task: Arc<Task>) -> Self {
-        self.task = Some(Arc::downgrade(&task));
+        let weak = Arc::downgrade(&task);
+        self.abort = Some(Box::new(move || {
+            if let Some(task) = weak.upgrade() {
+                task.abort();
+            }
+        }));
+        self
+    }
+
+    /// Like [`with_task`](Self::with_task), but for a task spawned via
+    /// [`super::local::LocalSet::spawn_local`] rather than the
+    /// multi-threaded scheduler's own `Task`.
+    pub(super) fn with_local_task(mut self, task: Arc<super::local::LocalTask>) -> Self {
+        let weak = Arc::downgrade(&task);
+        self.abort = Some(Box::new(move || {
+            if let Some(task) = weak.upgrade() {
+                task.abort();
+            }
+        }));
         self
     }
 
@@ -107,8 +136,8 @@ impl<T> JoinHandle<T> {
     /// A subsequent `.await` on this handle yields
     /// [`JoinError::is_cancelled`].
     pub fn abort(&self) {
-        if let Some(task) = self.task.as_ref().and_then(Weak::upgrade) {
-            task.abort();
+        if let Some(abort) = &self.abort {
+            abort();
         }
     }
 }
