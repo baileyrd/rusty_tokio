@@ -1,0 +1,14 @@
+[package]
+name = "rusty_tokio"
+version = "0.1.0"
+edition = "2021"
+description = "A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives."
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3" }
+
+[profile.release]
+debug = true
