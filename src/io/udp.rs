@@ -1,5 +1,5 @@
 use super::reactor::{ready_io, Interest, Reactor, ScheduledIo};
-use super::socket::from_platform_err;
+use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
@@ -49,6 +49,38 @@ impl UdpSocket {
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         ready_io(&self.io, Interest::Read, || {
             self.inner.recv_from(buf).map_err(from_platform_err)
+        })
+        .await
+    }
+
+    /// Fixes `addr` as this socket's peer, so [`send`](Self::send)/
+    /// [`recv`](Self::recv) can omit it on every call afterward. Unlike
+    /// TCP's `connect`, this is a local, synchronous operation -- UDP's
+    /// `connect(2)` doesn't perform a network handshake, it just records
+    /// a default peer address (and, for a socket that was never bound,
+    /// picks one) -- so there's nothing to `.await` here, and this
+    /// crate's usual hand-rolled non-blocking-connect dance (`connect`
+    /// in `socket/mod.rs`, needed because *TCP*'s `connect(2)` can
+    /// return `EINPROGRESS`) is reused directly: for UDP, its
+    /// `EINPROGRESS` branch simply never triggers.
+    pub fn connect(&self, addr: SocketAddr) -> io::Result<()> {
+        socket::connect(self.inner.as_raw_fd(), addr)
+    }
+
+    /// Sends to whichever peer [`connect`](Self::connect) fixed.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        ready_io(&self.io, Interest::Write, || {
+            socket::write(self.inner.as_raw_fd(), buf)
+        })
+        .await
+    }
+
+    /// Receives from whichever peer [`connect`](Self::connect) fixed --
+    /// datagrams from anyone else are not delivered to a connected UDP
+    /// socket.
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        ready_io(&self.io, Interest::Read, || {
+            socket::read(self.inner.as_raw_fd(), buf)
         })
         .await
     }
