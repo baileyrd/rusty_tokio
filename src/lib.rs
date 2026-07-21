@@ -90,6 +90,14 @@
 //!   cancellation, which would be a real use-after-free with a
 //!   buffer-touching opcode. See `io::reactor::io_uring`'s module docs
 //!   for the full reasoning.
+//! - **No `pin!` macro of this crate's own.** `std::pin::pin!` (stable
+//!   since Rust 1.68, independently of tokio's own `pin!`, which mostly
+//!   exists today for pre-1.68 compatibility and re-export convenience)
+//!   already does the exact same stack-pinning job and is what this
+//!   crate's own `block_on` uses internally
+//!   (`std::pin::pin!(future)` in `runtime::block_on_inner`) -- adding a
+//!   second macro that does the same thing would be redundant, not a
+//!   real gap.
 
 pub mod io;
 pub mod sync;
