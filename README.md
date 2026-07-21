@@ -338,6 +338,17 @@ rustils' API can't support them yet.
   rustils' own `TcpListener::bind` only exposes the combined "bind and
   immediately listen" operation, which wouldn't leave room to configure
   the socket in between.
+- **Async DNS resolution** (`io::lookup_host`): resolves a hostname
+  (`"example.com:443"`, an `(&str, u16)` pair, or anything else
+  implementing `std::net::ToSocketAddrs`) to its `SocketAddr`s without
+  blocking a worker thread. There's no portable non-blocking
+  `getaddrinfo` -- DNS (and `/etc/hosts`/NSS) resolution is a genuinely
+  blocking operation everywhere -- so this runs the real,
+  blocking `ToSocketAddrs::to_socket_addrs` on the `spawn_blocking` pool
+  and collects the results eagerly into a `LookupHost` iterator, the
+  same "looks async, is actually a `spawn_blocking` round trip" shape
+  `fs::File`/`io::stdio`/`process::Child::wait` already use for
+  operations with no reactor-driven alternative.
 - **`UnixDatagram`** (`io::UnixDatagram`): the connectionless `AF_UNIX`
   counterpart of `UdpSocket` -- one socket both sends and receives,
   addressed by filesystem path, no listener/stream split. The one socket

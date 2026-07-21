@@ -115,7 +115,13 @@
 //!   `TcpStream` once configured. None of those four options are in
 //!   rustils' own `TcpStream`/`TcpListener` traits, so each is a
 //!   hand-rolled `setsockopt`/`getsockopt` call, the same treatment
-//!   `socket/mod.rs`'s other slivers of raw `libc` already get.
+//!   `socket/mod.rs`'s other slivers of raw `libc` already get. And
+//!   [`io::lookup_host`]: resolves a hostname (`"example.com:443"`, or
+//!   anything else implementing `std::net::ToSocketAddrs`) to its
+//!   [`std::net::SocketAddr`]s without blocking a worker thread -- there's
+//!   no portable non-blocking `getaddrinfo`, so this is another
+//!   [`spawn_blocking`] round trip under the hood, the same shape
+//!   `fs::File`/`io::stdio`/`process::Child::wait` already use.
 //! - [`fs`]: [`fs::File`], the only type here so far. A regular file
 //!   can't be registered with a reactor's readiness model the way a
 //!   socket can -- the kernel considers it always "ready", and the real
