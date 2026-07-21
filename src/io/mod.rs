@@ -25,6 +25,7 @@ mod buffered;
 #[cfg(feature = "futures-io-compat")]
 mod compat;
 mod duplex;
+mod lookup;
 pub(crate) mod reactor;
 pub(crate) mod socket;
 mod stdio;
@@ -41,6 +42,7 @@ pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
 pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
+pub use lookup::{lookup_host, LookupHost};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{
     OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpSocket, TcpStream, WriteHalf,
