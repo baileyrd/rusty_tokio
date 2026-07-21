@@ -9,15 +9,27 @@
 //! [`ScheduledIo`] (the per-fd readiness state), [`Interest`], and the
 //! [`poll_io`]/[`ready_io`] helpers built on them are shared by every
 //! backend -- only the actual OS readiness syscall and how fds get
-//! registered with it differ, in `epoll.rs`/`kqueue.rs`. Both expose the
-//! identical `Reactor::{new, start, register, deregister, shutdown}`
-//! surface this module re-exports, so nothing above this module (or in
-//! `tcp.rs`/`udp.rs`) needs its own `#[cfg]` for which backend is live.
+//! registered with it differ, in `epoll.rs`/`kqueue.rs`/`io_uring.rs`.
+//! All three expose the identical `Reactor::{new, start, register,
+//! deregister, shutdown}` surface this module re-exports, so nothing
+//! above this module (or in `tcp.rs`/`udp.rs`/`unix.rs`) needs its own
+//! `#[cfg]` for which backend is live.
+//!
+//! A fourth combination exists on Linux: the `io-uring-reactor` feature
+//! (off by default) swaps `epoll.rs` for `io_uring.rs` at compile time
+//! -- see that module's docs for scope (readiness only, via
+//! `IORING_OP_POLL_ADD`; the actual `read`/`write` syscalls are
+//! unchanged) and why a broader io_uring integration isn't attempted.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "io-uring-reactor")))]
 mod epoll;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "io-uring-reactor")))]
 pub(crate) use epoll::Reactor;
+
+#[cfg(all(target_os = "linux", feature = "io-uring-reactor"))]
+mod io_uring;
+#[cfg(all(target_os = "linux", feature = "io-uring-reactor"))]
+pub(crate) use io_uring::Reactor;
 
 #[cfg(target_os = "macos")]
 mod kqueue;

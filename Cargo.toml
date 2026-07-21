@@ -29,9 +29,27 @@ futures-io = { version = "0.3", optional = true }
 # this crate's `TcpStream`/`UnixStream`/etc. Off by default so the
 # `futures-io` dependency is never pulled in unless asked for.
 futures-io-compat = ["dep:futures-io"]
+# A real io_uring-backed reactor (Linux only), selectable at compile
+# time in place of the default epoll backend -- see
+# `io::reactor::io_uring`'s docs for scope (readiness only, via
+# IORING_OP_POLL_ADD; the actual read/write syscalls are unchanged) and
+# why. Off by default: epoll is the proven, always-available default:
+# this is for consumers who want to opt into io_uring specifically.
+io-uring-reactor = ["dep:io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+# Optional (see the `io-uring-reactor` feature below): handles ring
+# setup/mmap and SQE/CQE layout safely -- issue #9 explicitly named this
+# crate (what tokio-uring/glommio/monoio are all built on) as the usual
+# reference point over hand-rolling raw io_uring_setup/io_uring_enter
+# syscalls and ring memory-mapping from scratch with no loom-style
+# verification tooling to trust it, the same reasoning behind not
+# hand-rolling a lock-free deque for issue #8. Target-gated to Linux
+# (like `platform-linux` above) since the crate itself is Linux-only --
+# unlike `futures-io`, there's no cross-platform reason to leave it
+# unconditional even for `[dependencies]` purposes.
+io-uring = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
