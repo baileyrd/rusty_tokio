@@ -15,7 +15,10 @@
 //! docs for the small remainder that's still hand-rolled on both), shaped
 //! identically enough between the two backends that `tcp.rs`/`udp.rs`/
 //! `unix.rs` each need only a `#[cfg]`-gated type alias, not their own OS
-//! branching.
+//! branching. [`UnixDatagram`] is the one exception -- rustils has no
+//! `AF_UNIX` datagram support at all, so `unix_datagram.rs` wraps
+//! `std::os::unix::net::UnixDatagram` directly instead; see that
+//! module's own docs for why.
 
 mod async_io;
 mod buffered;
@@ -28,6 +31,7 @@ mod stdio;
 mod tcp;
 mod udp;
 mod unix;
+mod unix_datagram;
 
 pub use async_io::{
     copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
@@ -45,3 +49,4 @@ pub use udp::UdpSocket;
 pub use unix::{
     OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixStream, UnixWriteHalf,
 };
+pub use unix_datagram::UnixDatagram;

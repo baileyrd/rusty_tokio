@@ -68,8 +68,14 @@
 //!   *before* an operation's own readiness check, not after.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
-//!   `UnixStream` / `UnixListener`, an `AsyncRead`/`AsyncWrite` trait
-//!   pair for generic code (`copy`, codecs, adapters), and
+//!   `UnixStream` / `UnixListener` / [`io::UnixDatagram`] (the one socket
+//!   type here built directly on `std::os::unix::net::UnixDatagram`
+//!   rather than a rustils concrete type -- rustils has no `AF_UNIX`
+//!   datagram support at all, see `io::unix_datagram`'s own module docs
+//!   for why wrapping `std`'s own implementation beat hand-rolling a
+//!   third copy of `AF_UNIX` sockaddr packing in this crate), an
+//!   `AsyncRead`/`AsyncWrite` trait pair for generic code (`copy`, codecs,
+//!   adapters), and
 //!   `AsyncBufRead`/`io::BufReader`/`io::BufWriter` for buffering on top
 //!   of any of the above -- this crate's own sockets are unbuffered by
 //!   design (see `AsyncWrite::poll_flush`'s docs), so these are how a

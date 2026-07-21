@@ -169,8 +169,8 @@ rustils' API can't support them yet.
   the starvation case above. A future polled outside of `Task::run` (an
   outer `block_on` future, most notably) has no budget in scope at all.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
-  `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
-  backends behind the same interface
+  `TcpListener`, `UdpSocket`, `UnixStream`, `UnixListener`, and
+  `UnixDatagram`. Two backends behind the same interface
   -- `epoll` on Linux, `kevent` on macOS -- both level-triggered by
   choice, since edge-triggered epoll/kqueue demands every reader drain a
   fd to `EWOULDBLOCK` or risk missing events forever, an easy invariant
@@ -338,6 +338,21 @@ rustils' API can't support them yet.
   rustils' own `TcpListener::bind` only exposes the combined "bind and
   immediately listen" operation, which wouldn't leave room to configure
   the socket in between.
+- **`UnixDatagram`** (`io::UnixDatagram`): the connectionless `AF_UNIX`
+  counterpart of `UdpSocket` -- one socket both sends and receives,
+  addressed by filesystem path, no listener/stream split. The one socket
+  type in `io` *not* built on a rustils concrete type: rustils' `Net`
+  trait has no `AF_UNIX` datagram support at all (only `unix_connect`/
+  `unix_listen` for connection-oriented `AF_UNIX` sockets), and rather
+  than hand-rolling a third copy of `AF_UNIX` sockaddr packing and
+  `sendto`/`recvfrom` in this crate (`socket/mod.rs` already has one
+  hand-rolled copy for non-blocking `AF_UNIX` stream `connect`, and
+  rustils has its own internal one), this wraps
+  `std::os::unix::net::UnixDatagram` directly -- std's own
+  implementation is already complete and needs zero new unsafe code
+  here, just a `set_nonblocking(true)` and reactor registration, the
+  same bridge `TcpStream::from_std` already builds for adopting a `std`
+  socket into this crate's reactor.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
