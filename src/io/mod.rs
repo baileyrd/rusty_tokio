@@ -6,19 +6,23 @@
 //! hardware.
 //!
 //! Socket bind/connect/accept/addressing is built on `rustils`' concrete
-//! `platform_linux::{LinuxTcpListener, LinuxTcpStream, LinuxUdpSocket}`
-//! on Linux and `platform_macos::{MacosTcpListener, MacosTcpStream,
-//! MacosUdpSocket}` on macOS (see `socket/mod.rs`'s docs for the small
-//! remainder that's still hand-rolled on both), shaped identically
-//! enough between the two backends that `tcp.rs`/`udp.rs` need only a
-//! `#[cfg]`-gated type alias, not their own OS branching.
+//! `platform_linux::{LinuxTcpListener, LinuxTcpStream, LinuxUdpSocket,
+//! LinuxUnixListener, LinuxUnixStream}` on Linux and
+//! `platform_macos::{MacosTcpListener, MacosTcpStream, MacosUdpSocket,
+//! MacosUnixListener, MacosUnixStream}` on macOS (see `socket/mod.rs`'s
+//! docs for the small remainder that's still hand-rolled on both), shaped
+//! identically enough between the two backends that `tcp.rs`/`udp.rs`/
+//! `unix.rs` each need only a `#[cfg]`-gated type alias, not their own OS
+//! branching.
 
 mod async_io;
 pub(crate) mod reactor;
 mod socket;
 mod tcp;
 mod udp;
+mod unix;
 
 pub use async_io::{copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 pub use tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpStream, WriteHalf};
 pub use udp::UdpSocket;
+pub use unix::{UnixListener, UnixStream};

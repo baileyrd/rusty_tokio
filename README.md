@@ -26,7 +26,8 @@ rustils' API can't support them yet.
   spawned from outside the pool, with work-stealing between workers when
   one goes idle.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
-  `TcpListener`, and `UdpSocket`. Two backends behind the same interface
+  `TcpListener`, `UdpSocket`, `UnixStream`, and `UnixListener`. Two
+  backends behind the same interface
   -- `epoll` on Linux, `kevent` on macOS -- both level-triggered by
   choice, since edge-triggered epoll/kqueue demands every reader drain a
   fd to `EWOULDBLOCK` or risk missing events forever, an easy invariant
@@ -114,24 +115,36 @@ With that in place, `io/tcp.rs` and `io/udp.rs` build directly on
 bind/listen/accept, addressing (`local_addr`/`peer_addr`), `set_nodelay`,
 and (for UDP) `send_to`/`recv_from` -- all of rustils' own sockaddr
 packing/unpacking, `SO_REUSEADDR`, and stale-socket handling, not
-reimplemented a second time here.
+reimplemented a second time here. `io/unix.rs` does the same for
+`platform_linux::{LinuxUnixListener, LinuxUnixStream}` -- including the
+mode-`0600` bind and stale-socket-file reclaim rustils' own
+`unix_listen` already does internally (a throwaway probe connect tells a
+dead listener's leftover socket file apart from a live one's, so a
+crashed-and-restarted listener can rebind at the same path without
+manual cleanup).
 
 Two things stayed hand-rolled in `io/socket/mod.rs`, both because of a
-real mismatch rather than taste:
+real mismatch rather than taste, and both apply equally to `UnixStream`
+as to `TcpStream`:
 
-- **Non-blocking `connect`.** `LinuxTcpStream::connect` creates a
-  *blocking* socket and calls a blocking `connect(2)` -- correct for
-  rustils' own callers, but it would stall an entire worker thread for a
-  connection's RTT if used here directly. An async connect needs the
-  socket non-blocking *before* `connect(2)`, so it's created and
-  connected by hand, then the resulting fd is adopted into the concrete
-  stream type via `From<OwnedFd>` for everything after.
-- **`read`/`write`.** `platform::net::TcpStream::read`/`write` take
-  `&mut self` -- fine for rustils' blocking callers, wrong for this
-  runtime's `TcpStream`, which deliberately exposes `&self` methods so
-  one task can read while another writes the same stream. Bypassing the
-  trait for these two (a raw `read`/`write` on an fd already in hand via
-  `AsRawFd`) keeps that API instead of hiding a mutex behind it.
+- **Non-blocking `connect`.** `LinuxTcpStream::connect`/
+  `LinuxUnixStream::connect` create a *blocking* socket and call a
+  blocking `connect(2)` -- correct for rustils' own callers, but it would
+  stall an entire worker thread for a connection's RTT if used here
+  directly. An async connect needs the socket non-blocking *before*
+  `connect(2)`, so it's created and connected by hand (`new_tcp_socket`/
+  `connect` for TCP, `new_unix_socket`/`unix_connect` for `AF_UNIX` --
+  the latter packing a `sockaddr_un` from a `Path` the same way the
+  former packs a `sockaddr_in`/`sockaddr_in6` from a `SocketAddr`), then
+  the resulting fd is adopted into the concrete stream type via
+  `From<OwnedFd>` for everything after.
+- **`read`/`write`.** `platform::net::TcpStream::read`/`write` and
+  `UnixStream::read`/`write` take `&mut self` -- fine for rustils'
+  blocking callers, wrong for this runtime's stream types, which
+  deliberately expose `&self` methods so one task can read while another
+  writes the same stream. Bypassing the trait for these two (a raw
+  `read`/`write` on an fd already in hand via `AsRawFd`) keeps that API
+  instead of hiding a mutex behind it.
 
 `rustils` had no macOS backend at all for a while, so this crate first
 had to hand-roll one (`io/socket/macos.rs`, since deleted). That gap was
@@ -141,10 +154,12 @@ pointing at the hand-rolled shim as reference material -- and landed as
 [rustils#52](https://github.com/baileyrd/rustils/pull/52), shaped to
 match `platform_linux` closely enough (same method names, same
 `platform::error::Result`, the rustils#41/#42 `AsFd`/`set_nonblocking`
-surface included from day one) that `io/tcp.rs`/`io/udp.rs` need only a
-`#[cfg]`-gated type alias between `platform_linux`/`platform_macos`, not
-their own branching. The same two hand-rolled exceptions above apply on
-macOS too, for the same reasons.
+surface included from day one -- and, it turned out, `UnixStream`/
+`UnixListener` included from day one too, not just TCP/UDP) that
+`io/tcp.rs`/`io/udp.rs`/`io/unix.rs` need only a `#[cfg]`-gated type
+alias between `platform_linux`/`platform_macos`, not their own branching.
+The same two hand-rolled exceptions above apply on macOS too, for the
+same reasons.
 [rustils#53](https://github.com/baileyrd/rustils/pull/53) then added a
 real `macos-latest` CI leg for `platform-macos`, which caught a genuine
 `AF_UNIX` behavioral bug the cross-target `cargo check` this crate still

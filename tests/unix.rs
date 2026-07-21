@@ -1,0 +1,133 @@
+use rusty_tokio::io::{UnixListener, UnixStream};
+use rusty_tokio::Runtime;
+
+fn temp_socket_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "rusty_tokio-test-{}-{}-{}.sock",
+        std::process::id(),
+        name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[test]
+fn unix_echo_roundtrip() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("echo");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        client.write_all(b"hello unix").await.unwrap();
+        let mut buf = [0u8; 64];
+        client.read_exact(&mut buf[..10]).await.unwrap();
+        assert_eq!(&buf[..10], b"hello unix");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn many_concurrent_unix_connections() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let path = temp_socket_path("many");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            for _ in 0..50 {
+                let (stream, _peer) = listener.accept().await.unwrap();
+                rusty_tokio::spawn(async move {
+                    let mut buf = [0u8; 8];
+                    let n = stream.read(&mut buf).await.unwrap();
+                    stream.write_all(&buf[..n]).await.unwrap();
+                });
+            }
+        });
+
+        let mut clients = Vec::new();
+        for i in 0..50u8 {
+            let path = path.clone();
+            clients.push(rusty_tokio::spawn(async move {
+                let stream = UnixStream::connect(&path).await.unwrap();
+                stream.write_all(&[i]).await.unwrap();
+                let mut buf = [0u8; 1];
+                stream.read_exact(&mut buf).await.unwrap();
+                assert_eq!(buf[0], i);
+            }));
+        }
+        for c in clients {
+            c.await.unwrap();
+        }
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn stale_socket_file_is_reclaimed_on_rebind() {
+    // A listener that's dropped without an explicit unlink leaves its
+    // socket file behind on disk -- rustils' own `unix_listen` detects
+    // that the path is stale (nothing is listening there anymore, via a
+    // throwaway probe connect) and reclaims it rather than failing with
+    // `AddrInUse`, the same behavior a re-run of a crashed daemon relies
+    // on. This exercises that behavior through this crate's wrapper.
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("stale");
+    rt.block_on(async {
+        {
+            let first = UnixListener::bind(&path).unwrap();
+            drop(first);
+        }
+        assert!(path.exists(), "the stale socket file should still exist");
+
+        // Rebinding at the same path should succeed by reclaiming the
+        // stale file, not fail with AddrInUse.
+        let second = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = second.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_live_listener_rejects_a_second_bind_at_the_same_path() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("live");
+    rt.block_on(async {
+        let _first = UnixListener::bind(&path).unwrap();
+        match UnixListener::bind(&path) {
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse,
+                "binding over a still-live listener's path should fail, not steal it"
+            ),
+            Ok(_) => panic!("binding over a still-live listener's path should fail, not steal it"),
+        }
+    });
+    let _ = std::fs::remove_file(&path);
+}
