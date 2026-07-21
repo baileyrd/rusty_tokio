@@ -50,6 +50,10 @@ debug = true
 name = "timers"
 harness = false
 
+[[bench]]
+name = "scheduler"
+harness = false
+
 [[test]]
 name = "futures_io_compat"
 required-features = ["futures-io-compat"]

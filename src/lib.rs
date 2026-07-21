@@ -68,6 +68,12 @@
 //! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
 //!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
 //!   actually uses) would scale better under heavy contention.
+//!   `benches/scheduler.rs` (`cargo bench`) measures this rather than
+//!   assuming it -- see the crate README's "Runtime" bullet for what it
+//!   found (a real regression on the injector-queue path, an
+//!   inconclusive result on the per-worker local-queue path this issue
+//!   is actually about) and why a hand-rolled lock-free replacement
+//!   isn't attempted here without `loom`-based verification first.
 //! - **No `io_uring`.** Would remove a syscall per I/O operation but is
 //!   a materially different reactor design.
 
