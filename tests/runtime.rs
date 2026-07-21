@@ -1,6 +1,6 @@
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[test]
@@ -76,6 +76,66 @@ fn a_panicking_task_reports_a_join_error_without_killing_the_runtime() {
         let still_works = rusty_tokio::spawn(async { 7 }).await.unwrap();
         assert_eq!(still_works, 7);
     });
+}
+
+#[test]
+fn yield_now_actually_gets_the_task_repolled() {
+    // A broken yield_now (one that never actually re-wakes the task)
+    // would just hang here forever -- the point of this test is that
+    // it doesn't.
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut count = 0;
+        for _ in 0..50 {
+            rusty_tokio::task::yield_now().await;
+            count += 1;
+        }
+        assert_eq!(count, 50);
+    });
+}
+
+#[test]
+fn yield_now_lets_two_same_queue_tasks_interleave() {
+    // Both `a` and `b` are spawned from *within* another task (not from
+    // `block_on`'s own thread) so they land on that worker's local
+    // queue in FIFO order -- interleaving depends only on the local
+    // queue's own FIFO order, not on any fairness between the local
+    // queue and the injector (a worker always drains its own local
+    // queue before ever touching the injector, so two tasks racing
+    // across *different* queues wouldn't reliably interleave the way
+    // this test wants to demonstrate).
+    let rt = Runtime::builder().worker_threads(1).build().unwrap();
+    let order = Arc::new(Mutex::new(Vec::new()));
+
+    rt.block_on(async {
+        let driver_order = order.clone();
+        rusty_tokio::spawn(async move {
+            let order_a = driver_order.clone();
+            let a = rusty_tokio::spawn(async move {
+                for i in 0..3 {
+                    order_a.lock().unwrap().push(('a', i));
+                    rusty_tokio::task::yield_now().await;
+                }
+            });
+            let order_b = driver_order.clone();
+            let b = rusty_tokio::spawn(async move {
+                for i in 0..3 {
+                    order_b.lock().unwrap().push(('b', i));
+                    rusty_tokio::task::yield_now().await;
+                }
+            });
+            a.await.unwrap();
+            b.await.unwrap();
+        })
+        .await
+        .unwrap();
+    });
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![('a', 0), ('b', 0), ('a', 1), ('b', 1), ('a', 2), ('b', 2)],
+        "yield_now should let two same-queue tasks interleave one iteration at a time"
+    );
 }
 
 #[test]

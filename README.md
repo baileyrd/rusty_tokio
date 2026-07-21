@@ -20,7 +20,9 @@ rustils' API can't support them yet.
   own executor" blog posts use) has a real lost-wakeup bug once you're
   actually multi-threaded: a wake that lands *while* a task is mid-poll
   finds the future temporarily missing from its slot and silently drops
-  the wakeup. `task`'s module docs walk through the fix.
+  the wakeup. `task`'s module docs walk through the fix. Also
+  `task::yield_now()`, for a task that wants to cooperate with others
+  without splitting itself across multiple spawns.
 - **Runtime** (`Runtime`, `Handle`): a fixed pool of worker threads, each
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when
