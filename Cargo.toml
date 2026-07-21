@@ -30,6 +30,16 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b702096
 # async I/O implementations interoperate -- issue #7's second option,
 # preferred over pulling in all of tokio just for its I/O traits.
 futures-io = { version = "0.3", optional = true }
+# Optional (see the `tracing` feature below): lets every spawned task
+# emit a `tracing::Span` shaped exactly the way real (unstable) tokio's
+# own instrumentation shapes it, so the real `console-subscriber`/
+# `tokio-console` tool -- built against that wire format, not this crate
+# specifically -- works against this runtime with zero changes on its
+# end. See `task::trace`'s own docs for exactly which parts of tokio's
+# full console support this covers.
+tracing = { version = "0.1", optional = true, default-features = false, features = [
+    "std",
+] }
 
 [features]
 # Implements `futures_io::{AsyncRead, AsyncWrite}` for a `Compat<T>`
@@ -46,6 +56,17 @@ futures-io-compat = ["dep:futures-io"]
 # why. Off by default: epoll is the proven, always-available default:
 # this is for consumers who want to opt into io_uring specifically.
 io-uring-reactor = ["dep:io-uring"]
+# Instruments every spawned task with a `tracing::Span` (target
+# `tokio::task`/`tokio::task::blocking`, span name `runtime.spawn`,
+# `kind`/`task.name`/`task.id`/`loc.file`/`loc.line`/`loc.col` fields) so
+# `console-subscriber` (the `tokio-console` terminal UI's data source)
+# can show this runtime's live tasks. Off by default -- like
+# `futures-io-compat`, the `tracing` dependency is never pulled in unless
+# asked for. See `task::trace`'s module docs for exactly what's covered
+# (task registration, name, spawn location, poll count, busy/idle time)
+# and what's deliberately not (waker clone/drop/self-wake stats,
+# resource/async-op instrumentation for `sync` primitives).
+tracing = ["dep:tracing"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
@@ -70,6 +91,12 @@ platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b
 # -- `required-features` below still skips building that one test
 # target unless the `futures-io-compat` feature is actually enabled.
 futures-io = "0.3"
+# Same reasoning as `futures-io` above, for `tests/tracing_instrumentation.rs`
+# -- that test implements its own minimal `tracing::Subscriber` to
+# inspect emitted spans directly, so it needs the crate unconditionally
+# even though `required-features` below skips the test target unless
+# the `tracing` feature is enabled.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [profile.release]
 debug = true
@@ -85,3 +112,7 @@ harness = false
 [[test]]
 name = "futures_io_compat"
 required-features = ["futures-io-compat"]
+
+[[test]]
+name = "tracing_instrumentation"
+required-features = ["tracing"]

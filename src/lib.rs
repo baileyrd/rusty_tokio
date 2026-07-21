@@ -35,7 +35,17 @@
 //!   can't cross into a `spawn_blocking` closure -- it runs inline, on
 //!   the calling worker thread, first handing that thread's other queued
 //!   work off to a freshly spawned replacement so the rest of the pool
-//!   doesn't stall waiting on it.
+//!   doesn't stall waiting on it. Also, behind the off-by-default
+//!   `tracing` Cargo feature: every spawned task gets a `tracing::Span`
+//!   shaped exactly the way real (unstable) tokio's own instrumentation
+//!   shapes it, so the real `console-subscriber`/`tokio-console` tool --
+//!   built against that wire format, not this crate specifically --
+//!   works against this runtime with zero changes on its end. See
+//!   `task::trace`'s module docs for exactly which parts of tokio's full
+//!   console support this covers (task registration, name, spawn
+//!   location, poll count, busy/idle time) and which it deliberately
+//!   doesn't (waker clone/drop/self-wake stats, resource/async-op
+//!   instrumentation for `sync` primitives).
 //! - [`Runtime`] / [`Handle`]: two flavors. The default
 //!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
 //!   threads, each with its own run queue, backed by a shared injector
@@ -287,6 +297,7 @@ use std::future::Future;
 /// # Panics
 /// Panics if called from a thread with no ambient runtime -- i.e.
 /// outside a `Runtime::block_on` call or a task already running on one.
+#[track_caller]
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -308,6 +319,7 @@ where
 ///
 /// # Panics
 /// Panics if called from a thread with no ambient runtime.
+#[track_caller]
 pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,

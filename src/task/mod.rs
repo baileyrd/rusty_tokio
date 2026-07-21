@@ -26,6 +26,7 @@ mod join_set;
 mod local;
 mod local_key;
 mod state;
+pub(crate) mod trace;
 mod yield_now;
 
 pub use block_in_place::block_in_place;
@@ -188,6 +189,7 @@ impl std::task::Wake for Task {
 
 /// Spawn `future` onto `shared`'s scheduler, returning a handle that can
 /// be awaited for its output (or used to abort it).
+#[track_caller]
 pub(crate) fn spawn<F>(shared: &Arc<Shared>, future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -198,6 +200,7 @@ where
 
 /// Like [`spawn`], but carrying an optional name -- the
 /// [`builder::Builder`] spawn path this backs.
+#[track_caller]
 pub(crate) fn spawn_named<F>(
     shared: &Arc<Shared>,
     future: F,
@@ -214,10 +217,17 @@ where
     let hook_inner = join_inner.clone();
     let hook: AbnormalHook = Box::new(move |outcome| hook_inner.finish_abnormal(outcome));
 
-    let wrapped: BoxFuture = Box::pin(async move {
-        let output = future.await;
-        join_inner.complete(output);
-    });
+    // `()` when the `tracing` feature is off -- see `trace`'s module
+    // docs for why call sites don't need to `#[cfg]` around this.
+    #[allow(clippy::let_unit_value)]
+    let span = trace::spawn_span("task", name.as_deref(), id.as_u64());
+    let wrapped: BoxFuture = Box::pin(trace::instrument(
+        async move {
+            let output = future.await;
+            join_inner.complete(output);
+        },
+        span,
+    ));
 
     let task = Arc::new(Task {
         id,
