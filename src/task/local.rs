@@ -43,8 +43,10 @@
 //!   multi-threaded `Runtime` already behaves for tasks abandoned by a
 //!   hard shutdown -- not a new gap introduced here.
 
+use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};
 use super::state::{State, StateSnapshot};
+use super::TaskId;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -59,6 +61,7 @@ type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
 type LocalAbnormalHook = Box<dyn FnOnce(Outcome)>;
 
 pub(super) struct LocalTask {
+    id: TaskId,
     state: State,
     future: RefCell<Option<LocalBoxFuture>>,
     scheduler: Weak<LocalShared>,
@@ -128,7 +131,16 @@ impl LocalTask {
         let waker = Waker::from(self.clone());
         let mut cx = Context::from_waker(&waker);
 
-        let poll_result = panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
+        let poll_result = {
+            let _id_guard = id::enter(CurrentTask {
+                id: self.id,
+                // `LocalSet`'s spawn path has no name-setting builder
+                // of its own (only `task::Builder`, for the
+                // multi-threaded scheduler), so this is always `None`.
+                name: None,
+            });
+            panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)))
+        };
 
         match poll_result {
             Ok(Poll::Ready(())) => {
@@ -230,8 +242,9 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
+    let id = TaskId::next();
     let join_inner = Arc::new(JoinInner::new());
-    let handle = JoinHandle::new(join_inner.clone());
+    let handle = JoinHandle::new(join_inner.clone(), id);
 
     let hook_inner = join_inner.clone();
     let hook: LocalAbnormalHook = Box::new(move |outcome| hook_inner.finish_abnormal(outcome));
@@ -242,6 +255,7 @@ where
     });
 
     let task = Arc::new(LocalTask {
+        id,
         state: State::new(),
         future: RefCell::new(Some(wrapped)),
         scheduler: Arc::downgrade(shared),

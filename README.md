@@ -28,7 +28,16 @@ rustils' API can't support them yet.
   plain `Vec<JoinHandle<T>>` one at a time), `abort_all`/`shutdown` to
   cancel everything at once, and -- unlike a bare `JoinHandle`, which
   never aborts on drop -- dropping the whole set aborts every task still
-  in it.
+  in it. Also named tasks and task IDs: every spawned task gets a
+  `TaskId` (`JoinHandle::id()`), a stable, process-wide-unique identity
+  independent of holding any reference to the task and unaffected by it
+  completing, panicking, or being aborted; `task::try_id()`/
+  `task::try_name()` read the *currently running* task's own ID/name
+  from inside its own future body (a thread-local set for the exact
+  duration of each poll call, restored afterward). `task::Builder::new()
+  .name("...").spawn(future)` is the alternative to plain `crate::spawn`
+  that actually sets a name -- plain `spawn`/`spawn_local`'d tasks always
+  have `try_name() == None`.
 - **`LocalSet`/`spawn_local`**: a place to spawn `!Send` futures --
   holding an `Rc`, a `RefCell`-guarded value, or any other non-thread-safe
   handle -- which `crate::spawn` can never accept, since every task

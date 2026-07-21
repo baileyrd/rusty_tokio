@@ -18,12 +18,16 @@
 //! just leaves a note (`NOTIFIED`) for the poller to see when it's done,
 //! and the poller reschedules itself if that note is present.
 
+mod builder;
+mod id;
 mod join;
 mod join_set;
 mod local;
 mod state;
 mod yield_now;
 
+pub use builder::Builder;
+pub use id::{try_id, try_name, TaskId};
 pub use join::{JoinError, JoinHandle};
 pub use join_set::JoinSet;
 pub use local::{spawn_local, LocalSet};
@@ -43,6 +47,8 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// the actual output value (if any) is threaded out separately through
 /// a [`JoinInner`], so `Task` itself never needs to be generic.
 pub(crate) struct Task {
+    id: TaskId,
+    name: Option<Arc<str>>,
     state: State,
     future: Mutex<Option<BoxFuture>>,
     scheduler: Weak<Shared>,
@@ -99,7 +105,17 @@ impl Task {
         let waker = std::task::Waker::from(self.clone());
         let mut cx = std::task::Context::from_waker(&waker);
 
-        let poll_result = panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
+        let poll_result = {
+            // Scoped tightly around just this poll call -- see
+            // `id::EnterGuard`'s docs for why that's the only span
+            // "the task currently running on this thread" is
+            // well-defined for.
+            let _id_guard = id::enter(id::CurrentTask {
+                id: self.id,
+                name: self.name.clone(),
+            });
+            panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)))
+        };
 
         match poll_result {
             Ok(std::task::Poll::Ready(())) => {
@@ -171,8 +187,23 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    spawn_named(shared, future, None)
+}
+
+/// Like [`spawn`], but carrying an optional name -- the
+/// [`builder::Builder`] spawn path this backs.
+pub(crate) fn spawn_named<F>(
+    shared: &Arc<Shared>,
+    future: F,
+    name: Option<Arc<str>>,
+) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let id = TaskId::next();
     let join_inner = Arc::new(JoinInner::new());
-    let handle = JoinHandle::new(join_inner.clone());
+    let handle = JoinHandle::new(join_inner.clone(), id);
 
     let hook_inner = join_inner.clone();
     let hook: AbnormalHook = Box::new(move |outcome| hook_inner.finish_abnormal(outcome));
@@ -183,6 +214,8 @@ where
     });
 
     let task = Arc::new(Task {
+        id,
+        name,
         state: State::new(),
         future: Mutex::new(Some(wrapped)),
         scheduler: Arc::downgrade(shared),

@@ -14,11 +14,17 @@
 //!   Also [`task::yield_now`], for a task that wants to cooperate with
 //!   others without splitting itself across multiple spawns,
 //!   [`task::JoinSet`], a dynamic collection of spawned tasks joined as
-//!   they finish rather than in spawn order, and [`task::LocalSet`] /
+//!   they finish rather than in spawn order, [`task::LocalSet`] /
 //!   [`task::spawn_local`] for `!Send` futures (holding an `Rc`, a
 //!   `RefCell`-guarded value, etc.) that `crate::spawn` can never
 //!   accept -- see [`task::LocalSet`]'s own docs for how a `!Send`
-//!   future still gets a thread-safe `Waker`.
+//!   future still gets a thread-safe `Waker` -- and
+//!   [`task::Builder`]/[`task::TaskId`]/[`task::try_id`]/
+//!   [`task::try_name`]: every spawned task gets a stable, process-wide
+//!   unique ID (`JoinHandle::id()`, or `task::try_id()` from inside the
+//!   task itself), and `task::Builder::new().name("...").spawn(future)`
+//!   lets it carry a name retrievable the same way via
+//!   `task::try_name()`.
 //! - [`Runtime`] / [`Handle`]: two flavors. The default
 //!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
 //!   threads, each with its own run queue, backed by a shared injector
