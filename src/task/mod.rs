@@ -20,11 +20,13 @@
 
 mod join;
 mod join_set;
+mod local;
 mod state;
 mod yield_now;
 
 pub use join::{JoinError, JoinHandle};
 pub use join_set::JoinSet;
+pub use local::{spawn_local, LocalSet};
 pub use yield_now::{yield_now, YieldNow};
 
 use crate::runtime::Shared;
