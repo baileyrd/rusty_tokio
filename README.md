@@ -24,7 +24,27 @@ rustils' API can't support them yet.
 - **Runtime** (`Runtime`, `Handle`): a fixed pool of worker threads, each
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when
-  one goes idle.
+  one goes idle. `benches/scheduler.rs` (`cargo bench`, same hand-rolled
+  approach as the timer benchmarks) measures issue #8's contention
+  question rather than assuming an answer: on the Linux dev box this was
+  built on, throughput for many independently-spawned tasks (which all
+  serialize through the single injector-queue `Mutex`) measurably
+  *regresses* going from 1 to 4 worker threads (roughly 1M &rarr; 300K
+  tasks/sec), while a steal-heavy nested-spawn workload's scaling across
+  1/2/4 workers was too noisy in this shared sandbox to draw a confident
+  conclusion either way. That's real evidence the injector path can
+  bottleneck under contention, but not clean enough evidence about the
+  per-worker local queues specifically (issue #8's actual ask) to justify
+  a hand-rolled lock-free rewrite without more rigorous measurement (a
+  dedicated, non-shared multi-core machine, larger sample sizes) and,
+  more importantly, without `loom`-based concurrency testing this project
+  doesn't currently have set up -- a correctness bar this specific piece
+  of code needs and the scheduler/reactor/timer logic elsewhere in this
+  crate is held to via ordinary multi-threaded integration tests instead.
+  If a lock-free swap does happen, `crossbeam-deque` (exactly what tokio
+  itself uses, well-audited) is the recommended starting point over
+  hand-rolling a Chase-Lev deque from scratch -- see #8 for the ongoing
+  discussion.
 - **Graceful shutdown**: plain `drop(runtime)` still tears down
   immediately (abandoning anything mid-poll, unchanged from before), but
   `Runtime::shutdown_background()`/`shutdown_timeout(duration)` and
@@ -231,7 +251,8 @@ cargo test      # unit tests for the task state machine, plus integration
                 # tests covering multi-threaded scheduling, abort, panics,
                 # TCP/UDP over the real reactor, and every sync primitive
 cargo clippy --all-targets
-cargo bench     # timer skew/drift/churn measurements -- see "Timers" above
+cargo bench     # timer skew/drift/churn and scheduler contention
+                # measurements -- see "Timers"/"Runtime" above
 
 # The futures-io compat shim (off by default -- see "What's deliberately
 # not here" below) has its own feature-gated test target:
