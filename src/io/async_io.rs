@@ -107,6 +107,37 @@ pub trait AsyncWrite {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+
+    /// Like `poll_write`, but from multiple buffers at once -- writes
+    /// as many bytes as it can starting from `bufs[0]`, in principle in
+    /// one syscall (`writev(2)`) rather than one call per buffer.
+    ///
+    /// The default implementation doesn't actually do that: it just
+    /// writes the first non-empty buffer via `poll_write` and ignores
+    /// the rest, the same fallback tokio's own `AsyncWrite` uses for any
+    /// writer that hasn't overridden this -- correct (every byte handed
+    /// to it does get written, eventually, over repeated calls), just
+    /// not the syscall-count win a real vectored write would be. Only
+    /// worth overriding for a writer where batching several buffers
+    /// into one real `writev` call actually matters.
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let buf = bufs
+            .iter()
+            .find(|b| !b.is_empty())
+            .map_or(&[][..], |b| &**b);
+        self.poll_write(cx, buf)
+    }
+
+    /// Whether this writer's `poll_write_vectored` actually batches
+    /// multiple buffers into fewer syscalls, rather than falling back to
+    /// the default single-buffer behavior. `false` unless overridden.
+    fn is_write_vectored(&self) -> bool {
+        false
+    }
 }
 
 /// Provided (non-overridable) conveniences over [`AsyncRead::poll_read`].
@@ -153,6 +184,47 @@ pub trait AsyncReadExt: AsyncRead {
             Ok(())
         }
     }
+
+    /// Reads until EOF, appending everything read to `buf`. Returns the
+    /// number of bytes appended (not `buf`'s new total length).
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let start_len = buf.len();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = self.read(&mut chunk).await?;
+                if n == 0 {
+                    return Ok(buf.len() - start_len);
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+    }
+
+    /// Reads until EOF, appending everything read to `buf` as UTF-8.
+    /// Fails with `InvalidData` (without modifying `buf`) if the bytes
+    /// read aren't valid UTF-8 -- checked only once EOF is reached,
+    /// same as tokio's own `read_to_string`, not incrementally per read.
+    fn read_to_string(&mut self, buf: &mut String) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let mut bytes = Vec::new();
+            let n = self.read_to_end(&mut bytes).await?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )
+            })?;
+            buf.push_str(&text);
+            Ok(n)
+        }
+    }
 }
 
 impl<T: AsyncRead + ?Sized> AsyncReadExt for T {}
@@ -166,6 +238,20 @@ pub trait AsyncWriteExt: AsyncWrite {
         Self: Unpin + Send,
     {
         async move { std::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await }
+    }
+
+    /// Like `write`, but from multiple buffers at once -- see
+    /// `AsyncWrite::poll_write_vectored`.
+    fn write_vectored(
+        &mut self,
+        bufs: &[io::IoSlice<'_>],
+    ) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            std::future::poll_fn(|cx| Pin::new(&mut *self).poll_write_vectored(cx, bufs)).await
+        }
     }
 
     fn write_all(&mut self, mut buf: &[u8]) -> impl Future<Output = io::Result<()>> + Send

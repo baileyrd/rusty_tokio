@@ -149,3 +149,111 @@ fn copy_streams_all_bytes_into_an_in_memory_sink() {
         server.await.unwrap();
     });
 }
+
+#[test]
+fn read_to_end_reads_until_eof() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream.write_all(b"hello, world!").await.unwrap();
+            AsyncWriteExt::shutdown(&mut &stream).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut buf = Vec::new();
+        // Pre-existing content should be appended to, not overwritten.
+        buf.extend_from_slice(b"prefix:");
+        let n = client.read_to_end(&mut buf).await.unwrap();
+
+        assert_eq!(n, b"hello, world!".len());
+        assert_eq!(buf, b"prefix:hello, world!");
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn read_to_string_reads_valid_utf8_until_eof() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream.write_all("héllo".as_bytes()).await.unwrap();
+            AsyncWriteExt::shutdown(&mut &stream).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut buf = String::new();
+        let n = client.read_to_string(&mut buf).await.unwrap();
+
+        assert_eq!(n, "héllo".len());
+        assert_eq!(buf, "héllo");
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn read_to_string_reports_invalid_utf8_without_modifying_the_buffer() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream.write_all(&[0xFF, 0xFE]).await.unwrap(); // not valid UTF-8
+            AsyncWriteExt::shutdown(&mut &stream).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut buf = String::from("unchanged");
+        let result = client.read_to_string(&mut buf).await;
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(buf, "unchanged");
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn write_vectored_writes_from_multiple_buffers() {
+    // The default `poll_write_vectored` only ever writes from the first
+    // non-empty buffer per call (see its doc comment), so getting
+    // everything across both buffers sent takes a loop that advances
+    // past however many bytes each call actually wrote -- the same
+    // shape `write_all` already needs for a single buffer.
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 12];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello, world");
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut first: &[u8] = b"hello";
+        let mut second: &[u8] = b", world";
+        while !first.is_empty() || !second.is_empty() {
+            let bufs = [std::io::IoSlice::new(first), std::io::IoSlice::new(second)];
+            let mut n = client.write_vectored(&bufs).await.unwrap();
+            assert!(n > 0, "write_vectored made no progress");
+            let take = n.min(first.len());
+            first = &first[take..];
+            n -= take;
+            let take = n.min(second.len());
+            second = &second[take..];
+        }
+
+        server.await.unwrap();
+    });
+}
