@@ -8,10 +8,12 @@ pub mod watch;
 
 mod mutex;
 mod notify;
+mod once_cell;
 mod rwlock;
 mod semaphore;
 
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::{Notified, Notify};
+pub use once_cell::{OnceCell, SetError};
 pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
