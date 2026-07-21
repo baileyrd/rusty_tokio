@@ -15,14 +15,20 @@
 //!   others without splitting itself across multiple spawns, and
 //!   [`task::JoinSet`], a dynamic collection of spawned tasks joined as
 //!   they finish rather than in spawn order.
-//! - [`Runtime`] / [`Handle`]: a fixed pool of worker threads, each
-//!   with its own run queue, backed by a shared injector queue and
-//!   able to steal from one another. `Runtime::shutdown_background`/
-//!   `shutdown_timeout` and `Handle::shutdown_notified`/
-//!   `is_shutting_down` give spawned tasks a real chance to observe
-//!   shutdown and clean up (flush a buffer, close a file) before
-//!   teardown, rather than just being abandoned mid-poll the way plain
-//!   `drop(runtime)` still does.
+//! - [`Runtime`] / [`Handle`]: two flavors. The default
+//!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
+//!   threads, each with its own run queue, backed by a shared injector
+//!   queue and able to steal from one another. `Builder::
+//!   new_current_thread` has no worker-thread pool at all -- spawned
+//!   tasks run interleaved with polls of `block_on`'s own future,
+//!   entirely on whichever thread calls it (spawned futures still need
+//!   to be `Send`, same as the multi-threaded flavor -- `!Send` support
+//!   needs a `LocalSet`, tracked separately). `Runtime::
+//!   shutdown_background`/`shutdown_timeout` and `Handle::
+//!   shutdown_notified`/`is_shutting_down` give spawned tasks a real
+//!   chance to observe shutdown and clean up (flush a buffer, close a
+//!   file) before teardown, rather than just being abandoned mid-poll
+//!   the way plain `drop(runtime)` still does.
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
 //!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
 //!   `UnixStream` / `UnixListener`, and an `AsyncRead`/`AsyncWrite` trait

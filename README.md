@@ -53,6 +53,23 @@ rustils' API can't support them yet.
   itself uses, well-audited) is the recommended starting point over
   hand-rolling a Chase-Lev deque from scratch -- see #8 for the ongoing
   discussion.
+- **Current-thread runtime** (`Builder::new_current_thread()`): the
+  above is the default (also `Builder::new_multi_thread()`, spelled out
+  for symmetry), but a runtime built this way has no worker-thread pool
+  at all -- spawned tasks run interleaved with polls of `block_on`'s own
+  future, entirely on whichever thread calls it, instead of on a
+  separate pool in the background. Useful for embedding in an
+  environment that doesn't want extra OS threads, or lower overhead for
+  single-threaded workloads that don't need work-stealing at all.
+  Spawned futures still need to be `Send` -- same as the multi-threaded
+  flavor; this alone doesn't enable `!Send` futures, which needs a
+  `LocalSet` (tracked separately). The I/O reactor and timer driver still
+  run on their own dedicated background threads regardless of flavor --
+  unlike real tokio's current-thread runtime, which drives its I/O
+  reactor inline on the single scheduling thread; collapsing this
+  crate's already-dedicated `Reactor`/`TimerDriver` threads into the
+  scheduling thread too would be a materially bigger redesign than a
+  worker-pool-free scheduler alone, and isn't attempted here.
 - **Graceful shutdown**: plain `drop(runtime)` still tears down
   immediately (abandoning anything mid-poll, unchanged from before), but
   `Runtime::shutdown_background()`/`shutdown_timeout(duration)` and
