@@ -64,6 +64,7 @@ impl Task {
             // (if still present) is dropped without being polled again.
             self.future.lock().unwrap().take();
             self.fire_abnormal_hook(Outcome::Aborted);
+            self.mark_finished();
             return;
         }
 
@@ -71,6 +72,7 @@ impl Task {
             self.future.lock().unwrap().take();
             self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);
+            self.mark_finished();
             return;
         }
 
@@ -83,6 +85,7 @@ impl Task {
             drop(slot);
             self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);
+            self.mark_finished();
             return;
         };
         drop(slot);
@@ -99,6 +102,7 @@ impl Task {
                 // on the normal-completion path; drop the hook so it
                 // doesn't hold that Arc alive for no reason.
                 self.abnormal_hook.lock().unwrap().take();
+                self.mark_finished();
             }
             Ok(std::task::Poll::Pending) => {
                 *self.future.lock().unwrap() = Some(future);
@@ -112,7 +116,20 @@ impl Task {
                 *self.future.lock().unwrap() = None;
                 self.state.end_poll(true);
                 self.fire_abnormal_hook(Outcome::Panicked(payload));
+                self.mark_finished();
             }
+        }
+    }
+
+    /// Decrements the scheduler's live-task count -- see
+    /// [`Shared::wait_for_tasks_drain`] and issue #12's graceful
+    /// shutdown, the only consumer of this count. Called from every
+    /// terminal path in `run` (normal completion, panic, or abort),
+    /// never on `Pending`, since a `Pending` task is still alive and
+    /// expected to be polled again.
+    fn mark_finished(&self) {
+        if let Some(shared) = self.scheduler.upgrade() {
+            shared.task_finished();
         }
     }
 
@@ -166,6 +183,7 @@ where
         abnormal_hook: Mutex::new(Some(hook)),
     });
 
+    shared.task_spawned();
     shared.schedule(task.clone());
     handle.with_task(task)
 }

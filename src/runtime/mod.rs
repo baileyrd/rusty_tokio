@@ -11,12 +11,14 @@ mod worker;
 pub use context::Handle;
 
 use crate::io::reactor::Reactor;
+use crate::sync::Notify;
 use crate::task::{self, JoinHandle};
 use crate::time::TimerDriver;
 use blocking::BlockingPool;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// State shared by every worker thread, the reactor, and the timer
 /// driver. Lives for as long as the `Runtime` (and, transitively, any
@@ -26,7 +28,36 @@ pub(crate) struct Shared {
     local_queues: Vec<Mutex<std::collections::VecDeque<Arc<task::Task>>>>,
     park_lock: Mutex<()>,
     park_condvar: Condvar,
+    /// The *hard* shutdown flag: once set, worker threads stop picking
+    /// up new tasks at all. Distinct from `shutting_down` below, which
+    /// fires first and only *advises* tasks that shutdown has begun --
+    /// see `Runtime::shutdown_timeout`'s doc comment for why the gap
+    /// between the two matters.
     shutdown: AtomicBool,
+    /// Set once, the first time any shutdown path (`Runtime::drop`,
+    /// `shutdown_background`, or `shutdown_timeout`) begins. Checked by
+    /// `teardown_once` so the compiler-generated `Drop::drop` that still
+    /// runs after a `shutdown_background`/`shutdown_timeout` call
+    /// consumes `self` by value doesn't redo (or, worse, re-wait on)
+    /// work already done.
+    torn_down: AtomicBool,
+    /// The persistent, checkable half of the graceful-shutdown signal --
+    /// see `shutdown_notified`'s doc comment for why a bare `Notify`
+    /// alone (which only wakes whoever's *already* waiting) isn't
+    /// enough on its own.
+    shutting_down: AtomicBool,
+    shutdown_signal: Notify,
+    /// Tasks currently spawned and not yet finished (completed, aborted,
+    /// or panicked) -- incremented in `task::spawn`, decremented from
+    /// every terminal path in `task::Task::run`. The only thing this
+    /// crate uses it for is `wait_for_tasks_drain`, so `Relaxed` on the
+    /// increment/decrement themselves is fine; the drain wait's own
+    /// mutex lock/unlock around checking it is what actually provides
+    /// the necessary synchronization with whichever thread just
+    /// decremented it to zero.
+    active_tasks: AtomicUsize,
+    drain_lock: Mutex<()>,
+    drain_condvar: Condvar,
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
     pub(crate) blocking_pool: BlockingPool,
@@ -77,6 +108,77 @@ impl Shared {
 
     fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` only the first time it's called -- see
+    /// `torn_down`'s field docs.
+    fn teardown_once(&self) -> bool {
+        !self.torn_down.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn task_spawned(&self) {
+        self.active_tasks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn task_finished(&self) {
+        self.active_tasks.fetch_sub(1, Ordering::Relaxed);
+        // Cheap and only ever contended during a `shutdown_timeout`
+        // call, same "notify without necessarily holding the paired
+        // lock at this exact instant" pattern `BlockingPool`'s own
+        // worker loop already relies on -- a wakeup this races is
+        // caught on `wait_for_tasks_drain`'s own bounded poll interval
+        // instead of instantly, not lost outright.
+        self.drain_condvar.notify_all();
+    }
+
+    /// Waits until every spawned task has finished, or `deadline`
+    /// passes -- whichever comes first. Returns without joining
+    /// anything or touching the hard `shutdown` flag; see
+    /// `Runtime::shutdown_timeout`.
+    fn wait_for_tasks_drain(&self, deadline: Instant) {
+        let mut guard = self.drain_lock.lock().unwrap();
+        while self.active_tasks.load(Ordering::Relaxed) > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let wait = (deadline - now).min(Duration::from_millis(50));
+            guard = self.drain_condvar.wait_timeout(guard, wait).unwrap().0;
+        }
+    }
+
+    /// Marks shutdown as having begun and wakes every task currently
+    /// awaiting `shutdown_notified()` -- the *advisory* half of
+    /// shutdown, fired before the hard `shutdown` flag so a task that's
+    /// awaiting it directly (e.g. a dedicated cleanup task) gets a real
+    /// chance to be scheduled and run before teardown proceeds, not just
+    /// notionally "notified" a moment before being abandoned.
+    pub(crate) fn begin_graceful_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.shutdown_signal.notify_waiters();
+    }
+
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Resolves once `begin_graceful_shutdown` has been called --
+    /// immediately, if it already has been by the time this is first
+    /// polled. Plain `Notify::notify_waiters` alone only wakes whoever's
+    /// *already* registered at the moment it's called (matching tokio's
+    /// own semantics -- see `sync::notify`'s docs); a task that calls
+    /// this *after* shutdown has already begun still needs to observe
+    /// that, which is exactly what the `shutting_down` flag checked here
+    /// first is for.
+    pub(crate) fn shutdown_notified(&self) -> impl Future<Output = ()> + Send + '_ {
+        let mut inner: Option<crate::sync::Notified<'_>> = None;
+        std::future::poll_fn(move |cx| {
+            if self.is_shutting_down() {
+                return std::task::Poll::Ready(());
+            }
+            let fut = inner.get_or_insert_with(|| self.shutdown_signal.notified());
+            std::pin::Pin::new(fut).poll(cx)
+        })
     }
 }
 
@@ -129,6 +231,12 @@ impl Builder {
             park_lock: Mutex::new(()),
             park_condvar: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            torn_down: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            shutdown_signal: Notify::new(),
+            active_tasks: AtomicUsize::new(0),
+            drain_lock: Mutex::new(()),
+            drain_condvar: Condvar::new(),
             reactor,
             timer,
             blocking_pool,
@@ -203,14 +311,87 @@ impl Runtime {
         let _guard = context::enter(self.shared.clone());
         block_on_inner(future)
     }
-}
 
-impl Drop for Runtime {
-    fn drop(&mut self) {
+    /// The four steps every shutdown path ends with: flip the hard
+    /// `shutdown` flag so worker threads stop picking up new tasks, wake
+    /// anything still parked so it re-checks that flag promptly instead
+    /// of waiting out its own park timeout, and tear down the reactor
+    /// and timer threads. Both are simple event loops with nothing of
+    /// the caller's left to wait on once told to stop, so this always
+    /// joins them regardless of which shutdown path called it.
+    fn stop_scheduling_and_reactor(&self) {
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.wake_all_parked();
         self.shared.reactor.shutdown();
         self.shared.timer.shutdown();
+    }
+
+    /// Signals shutdown and returns immediately -- doesn't wait for
+    /// outstanding tasks to finish, the blocking pool to drain, or even
+    /// the worker threads themselves to exit. Dropping the worker
+    /// threads' `JoinHandle`s here (instead of joining them, as every
+    /// other shutdown path does) doesn't stop or detach-kill them --
+    /// they keep running in the background, finishing whatever task
+    /// they're mid-poll on and then exiting once they next check the
+    /// now-true `shutdown` flag, just unobserved by this call.
+    ///
+    /// Prefer [`Runtime::shutdown_timeout`] over this when spawned tasks
+    /// might hold something worth letting finish cleanly (a flush, a
+    /// file close) -- this method gives them no time at all.
+    pub fn shutdown_background(mut self) {
+        self.shared.begin_graceful_shutdown();
+        if !self.shared.teardown_once() {
+            return;
+        }
+        self.stop_scheduling_and_reactor();
+        self.shared.blocking_pool.signal_shutdown();
+        self.workers.take();
+    }
+
+    /// Signals shutdown, then waits up to `timeout` for every
+    /// outstanding task to finish and the blocking pool to drain before
+    /// falling back to the same abrupt teardown `Drop` gives if it
+    /// doesn't happen in time.
+    ///
+    /// "Waits" here is deliberately advisory-plus-bounded, not a hard
+    /// guarantee every task runs to completion: the hard `shutdown` flag
+    /// (which makes worker threads stop picking up *new* tasks, though
+    /// they still finish whichever one they're mid-poll on) isn't set
+    /// until after this wait, so tasks already queued or running keep
+    /// making progress the whole time -- but a task that's genuinely
+    /// stuck (blocked forever on something that will never resolve, or
+    /// a `spawn_blocking` closure in a blocking syscall this crate has
+    /// no way to preempt) will still be here when `timeout` elapses, at
+    /// which point this stops waiting and tears down anyway, the same
+    /// as `shutdown_background` would.
+    pub fn shutdown_timeout(mut self, timeout: Duration) {
+        self.shared.begin_graceful_shutdown();
+        let deadline = Instant::now() + timeout;
+        self.shared.wait_for_tasks_drain(deadline);
+        if !self.shared.teardown_once() {
+            return;
+        }
+        self.stop_scheduling_and_reactor();
+        self.shared.blocking_pool.signal_shutdown();
+        self.shared.blocking_pool.wait_for_drain(Some(deadline));
+        if let Some(workers) = self.workers.take() {
+            for w in workers {
+                let _ = w.join();
+            }
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.shared.begin_graceful_shutdown();
+        if !self.shared.teardown_once() {
+            // `shutdown_background`/`shutdown_timeout` already ran this
+            // (they consume `self` by value, so this `drop` still runs
+            // once their body returns) -- nothing left to do.
+            return;
+        }
+        self.stop_scheduling_and_reactor();
         self.shared.blocking_pool.shutdown();
         if let Some(workers) = self.workers.take() {
             for w in workers {

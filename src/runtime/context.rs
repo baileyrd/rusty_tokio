@@ -77,6 +77,32 @@ impl Handle {
             }
         })
     }
+
+    /// Non-blocking check: has the runtime started shutting down (via
+    /// `Runtime::drop`, `shutdown_background`, or `shutdown_timeout`)?
+    /// Useful for a cooperative loop to check between chunks of its own
+    /// work -- e.g. `while !handle.is_shutting_down() { ... }` -- without
+    /// needing to `.await` anything. See [`Handle::shutdown_notified`]
+    /// for the awaitable form.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shared.is_shutting_down()
+    }
+
+    /// Resolves once the runtime starts shutting down -- immediately, if
+    /// it already has by the time this is first polled. A task can
+    /// `.await` this directly as its entire body (e.g. a dedicated
+    /// cleanup task that does nothing until shutdown, then flushes a
+    /// buffer or closes a file) and is guaranteed a real chance to be
+    /// scheduled and run before the runtime's worker pool stops picking
+    /// up tasks.
+    ///
+    /// This crate has no `select!` macro, so a task that wants to race
+    /// this against its *own* ongoing work (rather than waiting on it
+    /// alone) has no direct way to do so yet -- combining the two would
+    /// need one, or a hand-written `poll_fn` doing so manually.
+    pub fn shutdown_notified(&self) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.shared.shutdown_notified()
+    }
 }
 
 /// Installs `handle` as the ambient runtime for as long as the guard
