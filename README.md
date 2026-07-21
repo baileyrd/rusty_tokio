@@ -165,6 +165,22 @@ rustils' API can't support them yet.
   register+cancel churn sustains roughly 2M ops/sec. Numbers will vary
   by machine; re-run the benchmark rather than trusting these if it
   matters for your use case.
+- **Pausable clock for tests** (`time::pause`/`resume`/`advance`): every
+  timer deadline is compared against a `Clock` abstraction rather than
+  raw `Instant::now()` directly, so a `Builder::new_current_thread`
+  runtime's clock can be frozen (`time::pause()`) and then jumped
+  forward instantly (`time::advance(duration).await`), firing every
+  timer that would have fired during that span, in order, without any
+  real waiting -- letting a test assert on long-timeout/interval-drift
+  behavior in milliseconds instead of real minutes. `advance` re-checks
+  for newly due timers fresh after each firing (not from a
+  pre-snapshotted list), so a task woken partway through that
+  immediately registers another, shorter sleep still gets it picked up
+  within the same `advance` call, as long as it falls within the
+  advanced span. Only available on the current-thread flavor -- pausing
+  wall-clock time shared by every task on a runtime would be incoherent
+  if other worker threads could be concurrently relying on real timing,
+  matching tokio's own restriction.
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
   an async-aware `Mutex`, a `oneshot` channel, a bounded `mpsc` channel,
   and `mpsc::unbounded_channel` -- same one-lock-covers-queue-and-wakers

@@ -96,12 +96,17 @@ impl Handle {
     /// scheduled and run before the runtime's worker pool stops picking
     /// up tasks.
     ///
-    /// This crate has no `select!` macro, so a task that wants to race
-    /// this against its *own* ongoing work (rather than waiting on it
-    /// alone) has no direct way to do so yet -- combining the two would
-    /// need one, or a hand-written `poll_fn` doing so manually.
+    /// A task that wants to race this against its *own* ongoing work
+    /// (rather than waiting on it alone) can do so with `select!`.
     pub fn shutdown_notified(&self) -> impl std::future::Future<Output = ()> + Send + '_ {
         self.shared.shutdown_notified()
+    }
+
+    /// Whether this handle's runtime was built via
+    /// [`super::Builder::new_current_thread`] -- checked by
+    /// `time::pause`, which only makes sense on that flavor.
+    pub(crate) fn is_current_thread(&self) -> bool {
+        self.shared.is_current_thread()
     }
 }
 
