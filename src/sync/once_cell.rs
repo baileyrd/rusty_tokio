@@ -2,15 +2,35 @@
 //! tasks concurrently ask for it -- the first caller runs the
 //! initializer; everyone else (including callers that arrive *while*
 //! that initializer is still running, not just ones that arrive before
-//! it starts) parks on a [`Notify`] and gets back the same result
-//! instead of racing to initialize independently.
+//! it starts) parks and gets back the same result instead of racing to
+//! initialize independently.
+//!
+//! **Why this hand-rolls its own waiter list instead of building on
+//! [`crate::sync::Notify`]** (the same call [`crate::sync::Barrier`]
+//! already makes, for the identical reason -- see that module's own
+//! docs): `Notify`'s waiters queue lives behind a *separate* lock from
+//! whatever external state a caller checks first, and `Notify::
+//! notify_waiters`'s own docs note it deliberately banks nothing for a
+//! `notified()` call registered afterward. A caller here that observes
+//! `Initializing` and *then* registers with a separately-locked `Notify`
+//! has a real gap in between where the in-flight initializer can finish
+//! (successfully, or via a panic resetting the cell) and call
+//! `notify_waiters` -- landing in that gap means waiting for a
+//! notification that will never come, since nothing calls
+//! `notify_waiters` again once the cell reaches its terminal
+//! `Initialized` state. Folding the waiter list into the *same* lock as
+//! `state` closes this: every wait re-checks `state` and registers to be
+//! woken as one atomic step under that one lock, so a waiter either sees
+//! its wait is already over (no need to register at all) or is
+//! guaranteed to land in the waiter list before a completing initializer
+//! can possibly drain it.
 
-use crate::sync::Notify;
 use std::cell::UnsafeCell;
 use std::fmt;
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::mem::MaybeUninit;
 use std::sync::Mutex as StdMutex;
+use std::task::{Poll, Waker};
 
 /// What [`OnceCell::try_claim`] found -- see that method's docs.
 enum Claim {
@@ -26,16 +46,24 @@ enum State {
     Initialized,
 }
 
+struct Inner {
+    state: State,
+    /// Wakers for every caller currently parked waiting for `state` to
+    /// leave `Initializing` (whether that ends in `Initialized`, or back
+    /// in `Uninit` after a panic -- either way, every waiter wakes and
+    /// re-checks). Woken and cleared all at once on either transition.
+    wakers: Vec<Waker>,
+}
+
 /// A cell that's initialized at most once. See the module docs for the
 /// concurrent-caller behavior.
 pub struct OnceCell<T> {
-    state: StdMutex<State>,
-    // Only ever written while transitioning `state` into `Initialized`
-    // (in `get_or_init`/`set`), and only ever read once `state` has
-    // already been observed as `Initialized` -- past which point it is
-    // never written again for the rest of the cell's life.
+    inner: StdMutex<Inner>,
+    // Only ever written while transitioning `inner.state` into
+    // `Initialized` (in `get_or_init`/`set`), and only ever read once
+    // `state` has already been observed as `Initialized` -- past which
+    // point it is never written again for the rest of the cell's life.
     value: UnsafeCell<MaybeUninit<T>>,
-    notify: Notify,
 }
 
 // SAFETY: see `value`'s field docs -- once `state` is `Initialized`, the
@@ -50,25 +78,29 @@ unsafe impl<T: Send + Sync> Sync for OnceCell<T> {}
 impl<T> OnceCell<T> {
     pub fn new() -> Self {
         OnceCell {
-            state: StdMutex::new(State::Uninit),
+            inner: StdMutex::new(Inner {
+                state: State::Uninit,
+                wakers: Vec::new(),
+            }),
             value: UnsafeCell::new(MaybeUninit::uninit()),
-            notify: Notify::new(),
         }
     }
 
     /// A cell that's already initialized with `value`.
     pub fn new_with(value: T) -> Self {
         OnceCell {
-            state: StdMutex::new(State::Initialized),
+            inner: StdMutex::new(Inner {
+                state: State::Initialized,
+                wakers: Vec::new(),
+            }),
             value: UnsafeCell::new(MaybeUninit::new(value)),
-            notify: Notify::new(),
         }
     }
 
     /// The current value, if already initialized -- never waits or runs
     /// an initializer.
     pub fn get(&self) -> Option<&T> {
-        let state = *self.state.lock().unwrap();
+        let state = self.inner.lock().unwrap().state;
         if state == State::Initialized {
             // SAFETY: `state == Initialized` guarantees `value` holds a
             // valid, permanently-unmutated `T` -- see the struct docs.
@@ -79,7 +111,7 @@ impl<T> OnceCell<T> {
     }
 
     pub fn initialized(&self) -> bool {
-        *self.state.lock().unwrap() == State::Initialized
+        self.inner.lock().unwrap().state == State::Initialized
     }
 
     /// Sets the value if the cell is currently uninitialized. Returns
@@ -87,8 +119,8 @@ impl<T> OnceCell<T> {
     /// or if another caller's `get_or_init` initializer is currently in
     /// flight.
     pub fn set(&self, value: T) -> Result<(), SetError<T>> {
-        let mut guard = self.state.lock().unwrap();
-        match *guard {
+        let mut guard = self.inner.lock().unwrap();
+        match guard.state {
             State::Initialized => Err(SetError::AlreadyInitialized(value)),
             State::Initializing => Err(SetError::InitializingElsewhere(value)),
             State::Uninit => {
@@ -96,9 +128,12 @@ impl<T> OnceCell<T> {
                 // `Initialized` below), so no one else has written or
                 // read `value` yet.
                 unsafe { (*self.value.get()).write(value) };
-                *guard = State::Initialized;
+                guard.state = State::Initialized;
+                let wakers = std::mem::take(&mut guard.wakers);
                 drop(guard);
-                self.notify.notify_waiters();
+                for waker in wakers {
+                    waker.wake();
+                }
                 Ok(())
             }
         }
@@ -122,17 +157,33 @@ impl<T> OnceCell<T> {
     {
         loop {
             // Kept in its own non-async helper (rather than inlined
-            // here with the `state` lock held across the match arms)
-            // so the `MutexGuard` never becomes part of this `async
-            // fn`'s generated future -- otherwise the whole future
-            // stops being `Send`, since `MutexGuard` isn't.
+            // here with the `inner` lock held across the match arms) so
+            // the `MutexGuard` never becomes part of this `async fn`'s
+            // generated future -- otherwise the whole future stops
+            // being `Send`, since `MutexGuard` isn't.
             match self.try_claim() {
                 Claim::Ready => {
                     // SAFETY: see `get`.
                     return unsafe { (*self.value.get()).assume_init_ref() };
                 }
                 Claim::Initializing => {
-                    self.notify.notified().await;
+                    // Re-checks `state` and registers to be woken as
+                    // one atomic step under `inner`'s lock on *every*
+                    // poll, including the first -- so even if `state`
+                    // already changed since `try_claim` looked (the
+                    // in-flight initializer finished in between), this
+                    // resolves immediately instead of registering a
+                    // waker nothing will ever wake. See the module docs
+                    // for the two-lock race this avoids.
+                    poll_fn(|cx| {
+                        let mut guard = self.inner.lock().unwrap();
+                        if guard.state != State::Initializing {
+                            return Poll::Ready(());
+                        }
+                        guard.wakers.push(cx.waker().clone());
+                        Poll::Pending
+                    })
+                    .await;
                     continue;
                 }
                 Claim::Initialize => break,
@@ -152,24 +203,30 @@ impl<T> OnceCell<T> {
         // SAFETY: `state` is still `Initializing` (nothing else writes
         // `value` while it is), so this is the only writer.
         unsafe { (*self.value.get()).write(value) };
-        *self.state.lock().unwrap() = State::Initialized;
+        let wakers = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.state = State::Initialized;
+            std::mem::take(&mut guard.wakers)
+        };
         reset_on_incomplete.armed = false;
-        self.notify.notify_waiters();
+        for waker in wakers {
+            waker.wake();
+        }
         // SAFETY: see `get`.
         unsafe { (*self.value.get()).assume_init_ref() }
     }
 
     /// Non-async: checks (and, for `Initialize`, atomically claims) the
-    /// current state, entirely within one `state` lock/unlock -- kept
+    /// current state, entirely within one `inner` lock/unlock -- kept
     /// out of `get_or_init`'s own body so the `MutexGuard` it uses never
     /// crosses an `.await` point.
     fn try_claim(&self) -> Claim {
-        let mut guard = self.state.lock().unwrap();
-        match *guard {
+        let mut guard = self.inner.lock().unwrap();
+        match guard.state {
             State::Initialized => Claim::Ready,
             State::Initializing => Claim::Initializing,
             State::Uninit => {
-                *guard = State::Initializing;
+                guard.state = State::Initializing;
                 Claim::Initialize
             }
         }
@@ -177,7 +234,7 @@ impl<T> OnceCell<T> {
 
     /// Consumes the cell, returning its value if it was initialized.
     pub fn into_inner(self) -> Option<T> {
-        let initialized = *self.state.lock().unwrap() == State::Initialized;
+        let initialized = self.inner.lock().unwrap().state == State::Initialized;
         if !initialized {
             return None;
         }
@@ -206,15 +263,21 @@ struct ResetGuard<'a, T> {
 impl<T> Drop for ResetGuard<'_, T> {
     fn drop(&mut self) {
         if self.armed {
-            *self.cell.state.lock().unwrap() = State::Uninit;
-            self.cell.notify.notify_waiters();
+            let wakers = {
+                let mut guard = self.cell.inner.lock().unwrap();
+                guard.state = State::Uninit;
+                std::mem::take(&mut guard.wakers)
+            };
+            for waker in wakers {
+                waker.wake();
+            }
         }
     }
 }
 
 impl<T> Drop for OnceCell<T> {
     fn drop(&mut self) {
-        if *self.state.get_mut().unwrap() == State::Initialized {
+        if self.inner.get_mut().unwrap().state == State::Initialized {
             // SAFETY: `state` is `Initialized`, so `value` holds a
             // valid `T` that nothing else has referenced past `&mut
             // self` being obtainable (we're the sole owner, mid-drop).
