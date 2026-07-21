@@ -434,6 +434,26 @@ rustils' API can't support them yet.
   message afterward, rather than reporting `Lagged` forever or blocking
   the sender. `Sender::subscribe()` adds receivers after the fact --
   fresh ones only see messages sent from then on.
+
+  Also `Barrier`: a rendezvous point for a fixed number of tasks --
+  `Barrier::new(n)`, then every `wait().await` call blocks until `n` of
+  them have all called it, all `n` resolve together, and the barrier
+  immediately resets to accept the next round (one caller's
+  `BarrierWaitResult::is_leader()` is arbitrarily `true` per round, for
+  a task that wants to do one-time per-round bookkeeping without every
+  task racing to do it). Hand-rolls its own waiter list (a `Vec<Waker>`
+  behind the same plain `std::sync::Mutex` guarding the arrival count
+  and a generation counter) rather than building on `Notify`: `Notify`'s
+  own waiters queue lives behind a *separate* lock from whatever
+  external state a caller checks before registering with it, which means
+  a caller has to get "check the condition" and "register to be woken"
+  to happen as one atomic step relative to whatever might complete that
+  condition concurrently, on a different lock -- easy to get subtly
+  wrong. Folding the waiter list into the *same* lock already guarding
+  the arrival count sidesteps that: a waiter either observes its round
+  already completed (no registration needed at all) or is guaranteed to
+  land in the waiter list before the completing arrival can possibly
+  drain it, since both only ever happen while holding one mutex.
 - **`select!`**: race two to five futures, running whichever resolves
   first and dropping (cancelling) the rest -- `rusty_tokio::select! { pat
   = future => body, ... }`. Deliberately scoped rather than a full
