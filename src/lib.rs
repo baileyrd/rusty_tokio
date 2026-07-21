@@ -24,7 +24,13 @@
 //!   unique ID (`JoinHandle::id()`, or `task::try_id()` from inside the
 //!   task itself), and `task::Builder::new().name("...").spawn(future)`
 //!   lets it carry a name retrievable the same way via
-//!   `task::try_name()`.
+//!   `task::try_name()`. Also [`task_local!`]/[`task::LocalKey`]:
+//!   implicit per-task context (a request ID, say) that inner async
+//!   calls read via `KEY.with(...)` without it being threaded through
+//!   every function signature -- scoped to a task's execution rather
+//!   than an OS thread, so it isolates correctly even when many tasks'
+//!   polls interleave on one worker thread, unlike a plain
+//!   `std::thread_local!`.
 //! - [`Runtime`] / [`Handle`]: two flavors. The default
 //!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
 //!   threads, each with its own run queue, backed by a shared injector
