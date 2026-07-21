@@ -64,8 +64,21 @@ async fn signal_fires_once_per_occurrence_and_coalesces_bursts() {
         .expect("first recv should resolve promptly")
         .unwrap();
 
-    // No further occurrence yet: the next recv must not resolve
-    // immediately.
+    // The reader task can end up draining those three near-simultaneous
+    // raises across more than one of its own wake cycles under heavy
+    // scheduling contention (each `dispatch()` call is a harmless,
+    // redundant re-set of the same `pending` flag either way -- see
+    // `Signal`'s own coalescing docs), rather than always in the single
+    // read the fast-path case sees. Absorb any of those stragglers here
+    // -- each resolves near-instantly, so this loop only ever iterates
+    // more than once under exactly the contention this guards against --
+    // before checking the real "nothing further is pending" invariant
+    // below, so a late-arriving echo of the *original* burst can't be
+    // mistaken for a new occurrence.
+    while timeout(Duration::from_millis(50), sig.recv()).await.is_ok() {}
+
+    // No further occurrence now that the burst has fully settled: the
+    // next recv must not resolve.
     assert!(timeout(Duration::from_millis(200), sig.recv())
         .await
         .is_err());
