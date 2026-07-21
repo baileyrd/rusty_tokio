@@ -3,7 +3,9 @@
 //! `reactor/kqueue.rs`'s docs for the caveat that this crate's own
 //! integration with the macOS backend is compile-checked (`cargo check
 //! --target x86_64-apple-darwin`) but has never been run on real
-//! hardware.
+//! hardware. A fourth backend, `reactor/io_uring.rs`, swaps `epoll` for
+//! `IORING_OP_POLL_ADD` on Linux behind the `io-uring-reactor` feature
+//! (off by default) -- see that module's docs for scope and why.
 //!
 //! Socket bind/connect/accept/addressing is built on `rustils`' concrete
 //! `platform_linux::{LinuxTcpListener, LinuxTcpStream, LinuxUdpSocket,

@@ -74,8 +74,22 @@
 //!   inconclusive result on the per-worker local-queue path this issue
 //!   is actually about) and why a hand-rolled lock-free replacement
 //!   isn't attempted here without `loom`-based verification first.
-//! - **No `io_uring`.** Would remove a syscall per I/O operation but is
-//!   a materially different reactor design.
+//! - **io_uring is readiness-only, not a full completion-based
+//!   redesign.** The optional `io-uring-reactor` feature (off by
+//!   default; Linux only) swaps `epoll_wait` for `IORING_OP_POLL_ADD`
+//!   behind the exact same `ScheduledIo` interface every other backend
+//!   uses -- the actual `read`/`write` syscalls this crate's sockets
+//!   make are unchanged. Routing those through io_uring's own
+//!   read/write opcodes too (what would actually remove a syscall per
+//!   I/O operation, the real point of a "materially different reactor
+//!   design") needs an owned-buffer-passed-by-value API shape --
+//!   `tokio-uring`/`monoio`'s approach -- because the kernel holds a
+//!   pointer into the buffer for the operation's whole duration; this
+//!   crate's `AsyncRead`/`AsyncWrite` pass borrowed `&mut [u8]`, and a
+//!   `Future` holding one can be dropped mid-operation by ordinary Rust
+//!   cancellation, which would be a real use-after-free with a
+//!   buffer-touching opcode. See `io::reactor::io_uring`'s module docs
+//!   for the full reasoning.
 
 pub mod io;
 pub mod sync;

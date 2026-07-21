@@ -242,7 +242,30 @@ edges instead of papering over them:
 - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
   Correct and simple; a real lock-free Chase-Lev deque (what tokio
   itself uses) would scale better under heavy contention.
-- **No `io_uring`.**
+- **io_uring is readiness-only.** The optional `io-uring-reactor`
+  feature (off by default, Linux only) swaps `epoll_wait` for
+  `IORING_OP_POLL_ADD` behind the same `Reactor`/`ScheduledIo` interface
+  every other backend uses -- transparent to `TcpStream`/`UdpSocket`/
+  `UnixStream`/`AsyncRead`/`AsyncWrite`, no code changes needed to opt
+  in, and every existing integration test passes unchanged against it
+  (stable across 5 repeated runs on this dev box). It does *not* route
+  actual `read`/`write` syscalls through io_uring's own read/write
+  opcodes -- those still go through `socket/mod.rs` exactly as before.
+  That's a deliberate safety boundary, not an oversight: io_uring's
+  read/write opcodes hand the kernel a pointer into a buffer for the
+  whole duration of an async operation, but this crate's `AsyncRead`/
+  `AsyncWrite` pass borrowed `&mut [u8]`, and a `Future` holding one can
+  be dropped (cancelled) at any `Pending` point under ordinary Rust
+  semantics -- do that with a real io_uring read still in flight and the
+  kernel can write into memory that's since been freed, a genuine
+  use-after-free. `tokio-uring`/`monoio` solve this with an owned,
+  passed-by-value buffer API instead of a borrowed one; adopting that
+  shape here is a bigger, different-shaped change than issue #9 asked
+  for and isn't attempted. Built on the `io-uring` crate (what
+  `tokio-uring`/`glommio`/`monoio` all use) for the same reason the
+  lock-free deque discussion above recommends it over hand-rolling: ring
+  setup/mmap/SQE/CQE layout is real unsafe code this project has no
+  `loom`-style verification for.
 
 ## Testing
 
@@ -257,6 +280,12 @@ cargo bench     # timer skew/drift/churn and scheduler contention
 # The futures-io compat shim (off by default -- see "What's deliberately
 # not here" below) has its own feature-gated test target:
 cargo test --features futures-io-compat
+
+# The io_uring reactor backend (off by default, Linux only -- see
+# "What's deliberately not here" below) is transparent to every existing
+# test, so there's no separate test target for it -- just re-run
+# everything against it:
+cargo test --features io-uring-reactor
 
 # This crate's macOS reactor integration: compiles and type-checks, but
 # nothing beyond that -- see the macOS caveat above.
