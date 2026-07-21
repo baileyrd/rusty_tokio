@@ -15,7 +15,8 @@
 //!   with its own run queue, backed by a shared injector queue and
 //!   able to steal from one another.
 //! - [`io`]: an `epoll`-backed reactor plus non-blocking `TcpStream` /
-//!   `TcpListener` / `UdpSocket`.
+//!   `TcpListener` / `UdpSocket`, and an `AsyncRead`/`AsyncWrite` trait
+//!   pair for generic code (`copy`, codecs, adapters).
 //! - [`time`]: a timer-wheel-ish background thread for `sleep`,
 //!   `timeout`, and `interval`.
 //! - [`sync`]: `Notify`, an async `Mutex`, `oneshot`, and bounded `mpsc`
@@ -31,9 +32,11 @@
 //!   `eventfd`, and `accept4`. Porting to macOS/BSD (`kqueue`) or
 //!   Windows (IOCP) would mean a second reactor backend behind the same
 //!   `ScheduledIo` interface -- doable, not done.
-//! - **No `AsyncRead`/`AsyncWrite` trait ecosystem interop.** `TcpStream`
-//!   exposes plain inherent `async fn read`/`write` rather than the
-//!   trait pair the wider ecosystem (and codecs/framing crates) expect.
+//! - **`AsyncRead`/`AsyncWrite` are this crate's own trait definitions,
+//!   not tokio's or `futures-io`'s.** Shaped the same way (`Pin<&mut
+//!   Self>`, `poll_*` methods) so generic code here works the same way,
+//!   but a third-party codec/framing crate built against tokio's actual
+//!   trait won't accept this crate's `TcpStream` without a shim.
 //! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
 //!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
 //!   actually uses) would scale better under heavy contention.
