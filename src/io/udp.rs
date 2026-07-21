@@ -3,7 +3,7 @@ use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::Arc;
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
@@ -87,6 +87,33 @@ impl UdpSocket {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr().map_err(from_platform_err)
+    }
+
+    /// Adopts an already-bound `std` socket -- e.g. one received from a
+    /// supervisor process, or configured with `socket2` for an option
+    /// this crate doesn't expose a wrapper for. Flips it non-blocking
+    /// and registers it with the reactor without redoing the bind
+    /// syscall.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn from_std(socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformUdpSocket::from(OwnedFd::from(socket));
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(UdpSocket { inner, io, reactor })
+    }
+
+    /// The reverse of [`from_std`](Self::from_std) -- see
+    /// [`crate::io::TcpListener::into_std`] for the
+    /// flip-to-blocking/`dup(2)` reasoning, identical here.
+    pub fn into_std(self) -> io::Result<std::net::UdpSocket> {
+        self.inner
+            .set_nonblocking(false)
+            .map_err(from_platform_err)?;
+        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        Ok(std::net::UdpSocket::from(owned))
     }
 }
 

@@ -190,6 +190,25 @@ rustils' API can't support them yet.
   too (an already-successful direction spuriously turning into an
   error), a real bug this crate's own test suite caught before merging.
 
+  Also `from_std`/`into_std` on `TcpListener`, `TcpStream`, and
+  `UdpSocket`, for adopting an already-created `std` socket (handed down
+  from a supervisor process, or configured with `socket2` for an option
+  this crate exposes no wrapper for) or handing one back out as a plain
+  blocking socket. `from_std` just flips the socket non-blocking and
+  registers it with the reactor, skipping the bind/connect/listen
+  syscall since the `std` socket already did it. `into_std` flips back
+  to blocking and duplicates the fd (`try_clone_to_owned`, a `dup(2)`)
+  rather than transferring the original one -- `self` still drops
+  normally afterward (deregistering from the reactor, closing its own
+  fd), and the returned `std` socket is an independent fd onto the same
+  underlying open file description, the same guarantee
+  `TcpStream::try_clone` already relies on elsewhere in `std`. Costs one
+  extra syscall versus a true ownership transfer, which would need
+  `mem::forget`/`ManuallyDrop` tricks to skip running `Drop` for the
+  *whole* struct without also leaking the `Arc<ScheduledIo>`/
+  `Arc<Reactor>` fields' reference counts -- not worth the added unsafe
+  code for how rarely this is called.
+
   **This crate's macOS integration has never run on real hardware.**
   It's developed and tested on Linux only; the kqueue reactor and the
   `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of rustils'
