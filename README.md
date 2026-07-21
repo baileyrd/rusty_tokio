@@ -35,6 +35,13 @@ hand-rolled because rustils' API can't support them yet.
 - **Sync primitives** (`sync`): `Notify` (an async condition variable),
   an async-aware `Mutex`, a `oneshot` channel, and a bounded `mpsc`
   channel.
+- **`spawn_blocking`**: offloads a genuinely blocking closure onto a
+  separate thread pool that grows on demand (up to a configurable cap)
+  and shrinks back down when idle, instead of stalling an async worker
+  thread. Implemented as a `oneshot` channel plus an ordinary spawned
+  task awaiting it -- not a parallel handle type -- so panics, abort,
+  and `.await` on the returned `JoinHandle` all reuse the same task
+  machinery every other spawned task does.
 
 ## Example
 
@@ -114,8 +121,6 @@ edges instead of papering over them:
 - **No `AsyncRead`/`AsyncWrite` trait interop.** `TcpStream` exposes
   plain inherent `async fn read`/`write` rather than the trait pair the
   wider ecosystem (codec/framing crates, etc.) expects.
-- **No `spawn_blocking` / blocking thread pool.** A task that calls a
-  genuinely blocking syscall stalls the worker thread it's running on.
 - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
   Correct and simple; a real lock-free Chase-Lev deque (what tokio
   itself uses) would scale better under heavy contention.

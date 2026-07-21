@@ -4,6 +4,7 @@
 //! steal from one another when idle. Plus the I/O reactor and timer
 //! driver threads that feed wakeups back in.
 
+mod blocking;
 mod context;
 mod worker;
 
@@ -12,6 +13,7 @@ pub use context::Handle;
 use crate::io::reactor::Reactor;
 use crate::task::{self, JoinHandle};
 use crate::time::TimerDriver;
+use blocking::BlockingPool;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -27,6 +29,7 @@ pub(crate) struct Shared {
     shutdown: AtomicBool,
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
+    pub(crate) blocking_pool: BlockingPool,
 }
 
 impl Shared {
@@ -80,6 +83,7 @@ impl Shared {
 /// Configures and builds a [`Runtime`].
 pub struct Builder {
     worker_threads: usize,
+    max_blocking_threads: usize,
 }
 
 impl Builder {
@@ -88,6 +92,7 @@ impl Builder {
             worker_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
+            max_blocking_threads: 32,
         }
     }
 
@@ -97,11 +102,22 @@ impl Builder {
         self
     }
 
+    /// Caps how many OS threads [`crate::spawn_blocking`] will grow the
+    /// blocking pool to. Threads above what's currently needed shrink
+    /// back down after sitting idle, so this is a ceiling on
+    /// concurrently-running blocking work, not a fixed cost.
+    pub fn max_blocking_threads(mut self, n: usize) -> Self {
+        assert!(n > 0, "a runtime needs at least one blocking thread");
+        self.max_blocking_threads = n;
+        self
+    }
+
     pub fn build(self) -> std::io::Result<Runtime> {
         let reactor = Arc::new(Reactor::new()?);
         reactor.start();
         let timer = Arc::new(TimerDriver::new());
         timer.start();
+        let blocking_pool = BlockingPool::new(self.max_blocking_threads);
 
         let local_queues = (0..self.worker_threads)
             .map(|_| Mutex::new(std::collections::VecDeque::new()))
@@ -115,6 +131,7 @@ impl Builder {
             shutdown: AtomicBool::new(false),
             reactor,
             timer,
+            blocking_pool,
         });
 
         let workers = (0..self.worker_threads)
@@ -168,6 +185,17 @@ impl Runtime {
         task::spawn(&self.shared, future)
     }
 
+    /// Run a genuinely blocking closure on a dedicated thread pool
+    /// instead of stalling a worker thread. See [`crate::spawn_blocking`]
+    /// for the full contract.
+    pub fn spawn_blocking<F, T>(&self, f: F) -> JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.handle().spawn_blocking(f)
+    }
+
     /// Drive `future` to completion on the calling thread, parking it
     /// (not busy-spinning) whenever it's `Pending`. Anything `future`
     /// spawns runs on the worker pool as usual.
@@ -183,6 +211,7 @@ impl Drop for Runtime {
         self.shared.wake_all_parked();
         self.shared.reactor.shutdown();
         self.shared.timer.shutdown();
+        self.shared.blocking_pool.shutdown();
         if let Some(workers) = self.workers.take() {
             for w in workers {
                 let _ = w.join();
