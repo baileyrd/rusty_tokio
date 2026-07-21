@@ -1,5 +1,6 @@
-use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 use rusty_tokio::Runtime;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,128 @@ fn mutex_serializes_increments() {
         }
         assert_eq!(*mutex.lock().await, 500);
     });
+}
+
+#[test]
+fn rwlock_allows_concurrent_readers() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let lock = Arc::new(RwLock::new(0));
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let lock = lock.clone();
+            let concurrent = concurrent.clone();
+            let max_concurrent = max_concurrent.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let _guard = lock.read().await;
+                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    assert!(
+        max_concurrent.load(Ordering::SeqCst) > 1,
+        "readers should be able to run concurrently, not serialize"
+    );
+}
+
+#[test]
+fn rwlock_writers_are_mutually_exclusive_and_exclude_readers() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let lock = Arc::new(RwLock::new(0u64));
+
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..500 {
+            let lock = lock.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let mut guard = lock.write().await;
+                let cur = *guard;
+                // Yield while holding the write lock -- a broken
+                // implementation that let a reader or another writer in
+                // concurrently would get a real chance to race here.
+                rusty_tokio::time::sleep(Duration::from_micros(1)).await;
+                *guard = cur + 1;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(*lock.read().await, 500);
+    });
+}
+
+#[test]
+fn rwlock_is_write_preferring() {
+    // A writer that starts waiting should get in before a reader that
+    // arrives afterward, even though nothing but other readers hold the
+    // lock at the moment that later reader actually calls `read()`.
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let lock = Arc::new(RwLock::new(()));
+    let order: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    rt.block_on(async {
+        let first_reader_guard = lock.read().await;
+
+        let lock_w = lock.clone();
+        let order_w = order.clone();
+        let writer = rusty_tokio::spawn(async move {
+            let _guard = lock_w.write().await;
+            order_w.lock().unwrap().push("writer");
+        });
+
+        // Give the writer a real chance to actually start waiting
+        // (register itself in the queue) before the second reader shows
+        // up.
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let lock_r2 = lock.clone();
+        let order_r2 = order.clone();
+        let second_reader = rusty_tokio::spawn(async move {
+            let _guard = lock_r2.read().await;
+            order_r2.lock().unwrap().push("second_reader");
+        });
+
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(first_reader_guard); // let the writer proceed
+
+        writer.await.unwrap();
+        second_reader.await.unwrap();
+    });
+
+    assert_eq!(*order.lock().unwrap(), vec!["writer", "second_reader"]);
+}
+
+#[test]
+fn rwlock_try_read_and_try_write() {
+    let lock = RwLock::new(5);
+    let r1 = lock.try_read().unwrap();
+    let r2 = lock.try_read().unwrap(); // multiple readers via try_read too
+    assert_eq!(*r1, 5);
+    assert_eq!(*r2, 5);
+    assert!(
+        lock.try_write().is_none(),
+        "try_write should fail while readers are held"
+    );
+    drop(r1);
+    drop(r2);
+
+    let mut w = lock.try_write().unwrap();
+    *w = 10;
+    assert!(
+        lock.try_read().is_none(),
+        "try_read should fail while the writer is held"
+    );
 }
 
 #[test]

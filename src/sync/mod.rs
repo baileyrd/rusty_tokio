@@ -7,6 +7,8 @@ pub mod oneshot;
 
 mod mutex;
 mod notify;
+mod rwlock;
 
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::{Notified, Notify};
+pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
