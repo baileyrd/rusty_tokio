@@ -26,7 +26,7 @@ mod buffered;
 mod compat;
 mod duplex;
 pub(crate) mod reactor;
-mod socket;
+pub(crate) mod socket;
 mod stdio;
 mod tcp;
 mod udp;
