@@ -11,9 +11,16 @@
 //! `crossbeam` suite (channels, epoch GC, etc.) as a shortcut around any
 //! of that -- just this one narrowly-scoped sub-crate for the one piece
 //! this project already decided isn't its point to hand-roll unverified.
+//! "No `mio`" means no dependency on it, not no awareness of it: the
+//! Windows reactor (`io::reactor::windows`) implements the same
+//! undocumented AFD-poll protocol mio's own Windows backend uses --
+//! there's no vendored crate for that trick, only mio's real source as a
+//! reference point, cited directly in that module's own docs.
 //! Socket setup in [`io`] builds on
 //! [`rustils`](https://github.com/baileyrd/rustils)'
-//! `platform`/`platform-linux`/`platform-macos` crates rather than
+//! `platform`/`platform-linux`/`platform-macos` crates on Linux/macOS,
+//! and directly on `windows-sys` on Windows (see `io::socket::windows`'s
+//! docs for why there's no rustils backend to lean on there) rather than
 //! reimplementing sockaddr packing and syscall error mapping a second
 //! time -- see the crate README's "Built on rustils" section for
 //! exactly which seam that is. It has seven pieces, one module each:
@@ -97,10 +104,12 @@
 //!   See `coop`'s (crate-private) module docs for exactly which
 //!   operations are charged and why the budget check has to run
 //!   *before* an operation's own readiness check, not after.
-//! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS) plus
-//!   non-blocking `TcpStream` / `TcpListener` / `UdpSocket` /
-//!   `UnixStream` / `UnixListener` / [`io::UnixDatagram`] (the one socket
-//!   type here built directly on `std::os::unix::net::UnixDatagram`
+//! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS, IOCP + the
+//!   AFD-poll trick on Windows) plus non-blocking `TcpStream` /
+//!   `TcpListener` / `UdpSocket` (all three cross-platform) and
+//!   `UnixStream` / `UnixListener` / [`io::UnixDatagram`] (`AF_UNIX`,
+//!   Unix-only -- see the platform-support note below; the last of these
+//!   built directly on `std::os::unix::net::UnixDatagram`
 //!   rather than a rustils concrete type -- rustils has no `AF_UNIX`
 //!   datagram support at all, see `io::unix_datagram`'s own module docs
 //!   for why wrapping `std`'s own implementation beat hand-rolling a
@@ -230,24 +239,34 @@
 //! This is a real, working runtime, not a toy -- but it's also honest
 //! about its edges rather than papering over them:
 //!
-//! - **Linux and macOS, not Windows or generic BSD.** The reactor has
-//!   two backends behind the same `ScheduledIo` interface --
-//!   `epoll`+`eventfd` on Linux, `kevent`+`EVFILT_USER` on macOS -- with
-//!   socket setup on macOS now coming from rustils' `platform-macos`
-//!   crate (added in response to rustils#48, filed from this crate's
-//!   own experience hand-rolling that layer the first time; the old
-//!   hand-rolled shim is gone). A Windows (IOCP) backend would need a
-//!   third, doable but not done. **This crate's own integration on top
-//!   of the macOS backend -- the kqueue reactor, `TcpStream`/
-//!   `TcpListener`/`UdpSocket` wrapping `platform-macos`'s types -- is
-//!   still compile-checked only (`cargo check --target
-//!   x86_64-apple-darwin`), never run on real hardware**, even though
-//!   `platform-macos` itself now has real `macos-latest` CI upstream
-//!   (which already caught a genuine `AF_UNIX` bug the cross-check
-//!   alone couldn't). This crate has only ever been developed and
-//!   tested on Linux -- treat the macOS reactor path as
-//!   reviewed-but-unverified until someone runs *this* crate's test
-//!   suite on an actual Mac, not just rustils'.
+//! - **Linux, macOS, and Windows -- not generic BSD.** The reactor has
+//!   three backends behind the same `ScheduledIo` interface --
+//!   `epoll`+`eventfd` on Linux, `kevent`+`EVFILT_USER` on macOS,
+//!   IOCP+the AFD-poll trick on Windows (`io::reactor::windows`'s own
+//!   module docs have the full protocol and this crate's deliberate
+//!   simplifications versus mio's reference implementation) -- with
+//!   socket setup on macOS coming from rustils' `platform-macos` crate
+//!   (added in response to rustils#48, filed from this crate's own
+//!   experience hand-rolling that layer the first time), and on Windows
+//!   entirely hand-rolled against `windows-sys` (`io::socket::windows`'s
+//!   docs explain why: rustils' own Windows backend predates the
+//!   non-blocking/`AsRawSocket`/`From<OwnedSocket>` surface this crate
+//!   needs). **This crate's own integration on top of both the macOS and
+//!   Windows backends -- the reactor, `TcpStream`/`TcpListener`/
+//!   `UdpSocket` wrapping each platform's socket layer -- is compile-checked
+//!   only** (`cargo check --target x86_64-apple-darwin` /
+//!   `--target x86_64-pc-windows-gnu`), **never run on real hardware**,
+//!   even though `platform-macos` itself now has real `macos-latest` CI
+//!   upstream (which already caught a genuine `AF_UNIX` bug the
+//!   cross-check alone couldn't). This crate has only ever been
+//!   developed and tested on Linux -- treat the macOS and Windows
+//!   reactor paths as reviewed-but-unverified until someone runs *this*
+//!   crate's test suite on the real OS, not just rustils' or mio's own.
+//!   `AF_UNIX` (`unix.rs`/`unix_datagram.rs`) and [`process`]/[`signal`]
+//!   are Unix-only and simply absent from the crate on Windows (no
+//!   `#[cfg]`-gated stub methods that would panic at runtime) -- there's
+//!   no portable equivalent to fall back to, matching how tokio itself
+//!   draws this exact same line.
 //! - **`AsyncRead`/`AsyncWrite` are this crate's own trait definitions,
 //!   not tokio's or `futures-io`'s.** Shaped the same way (`Pin<&mut
 //!   Self>`, `poll_*` methods) so generic code here works the same way,
@@ -288,7 +307,9 @@
 
 pub mod fs;
 pub mod io;
+#[cfg(unix)]
 pub mod process;
+#[cfg(unix)]
 pub mod signal;
 pub mod sync;
 pub mod task;

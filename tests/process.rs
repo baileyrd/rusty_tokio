@@ -1,3 +1,8 @@
+#![cfg(unix)]
+// `process`'s own module is Unix-only (see `src/process/mod.rs`'s docs),
+// and this file also uses `std::os::unix::process::ExitStatusExt`
+// directly -- gating the whole file rather than every individual item.
+
 use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt};
 use rusty_tokio::process::{Command, Stdio};
 use rusty_tokio::Runtime;

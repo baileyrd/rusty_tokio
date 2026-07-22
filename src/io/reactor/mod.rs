@@ -36,10 +36,80 @@ mod kqueue;
 #[cfg(target_os = "macos")]
 pub(crate) use kqueue::Reactor;
 
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::Reactor;
+
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
+
+/// The raw platform I/O handle every backend's `register`/`deregister`
+/// takes -- a plain fd on Unix, a `SOCKET` handle on Windows (IOCP has no
+/// fd concept at all; sockets there are `HANDLE`-like values, not small
+/// integers). Nothing above this module (`tcp.rs`/`udp.rs`) needs its
+/// own `#[cfg]` for which one it is; see [`AsRawIo`] for how a concrete
+/// socket type hands one over uniformly.
+#[cfg(unix)]
+pub(crate) type RawIo = std::os::fd::RawFd;
+#[cfg(windows)]
+pub(crate) type RawIo = std::os::windows::io::RawSocket;
+
+/// The owning counterpart of [`RawIo`] -- an `OwnedFd` on Unix, an
+/// `OwnedSocket` on Windows. Used for socket-creation return types and
+/// `From<OwnedIo>` conversions into a concrete platform socket type,
+/// mirroring `RawIo`'s role for borrowed access.
+#[cfg(unix)]
+pub(crate) type OwnedIo = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub(crate) type OwnedIo = std::os::windows::io::OwnedSocket;
+
+/// Hands over a [`RawIo`] regardless of platform -- a thin, uniform
+/// wrapper over `AsRawFd`/`AsRawSocket` so `tcp.rs`/`udp.rs` can call
+/// `.as_raw_io()` once instead of branching on `#[cfg(unix)]`/
+/// `#[cfg(windows)]` at every call site.
+pub(crate) trait AsRawIo {
+    fn as_raw_io(&self) -> RawIo;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> AsRawIo for T {
+    fn as_raw_io(&self) -> RawIo {
+        self.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsRawSocket> AsRawIo for T {
+    fn as_raw_io(&self) -> RawIo {
+        self.as_raw_socket()
+    }
+}
+
+/// Duplicates the underlying handle into an owned [`OwnedIo`], regardless
+/// of platform -- a thin, uniform wrapper over
+/// `AsFd::try_clone_to_owned`/`AsSocket::try_clone_to_owned` so
+/// `tcp.rs`/`udp.rs`'s `into_std` methods (which need an owned handle to
+/// hand to `std`) don't need their own `#[cfg(unix)]`/`#[cfg(windows)]`.
+pub(crate) trait TryCloneIo {
+    fn try_clone_io(&self) -> io::Result<OwnedIo>;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd> TryCloneIo for T {
+    fn try_clone_io(&self) -> io::Result<OwnedIo> {
+        self.as_fd().try_clone_to_owned()
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsSocket> TryCloneIo for T {
+    fn try_clone_io(&self) -> io::Result<OwnedIo> {
+        self.as_socket().try_clone_to_owned()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Interest {

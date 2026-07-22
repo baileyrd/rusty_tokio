@@ -1,3 +1,8 @@
+#![cfg(unix)]
+// `AF_UNIX` is Unix-only -- `UnixDatagram` is gated out of `rusty_tokio::io`
+// entirely on Windows (see `io/mod.rs`'s docs), so this whole file is
+// gated rather than every individual item.
+
 use rusty_tokio::io::UnixDatagram;
 use rusty_tokio::Runtime;
 

@@ -101,6 +101,29 @@ io-uring = { version = "0.6", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Not `platform-windows` (rustils' own Windows backend): as of the
+# pinned rev above, that crate's net module predates rustils#41's
+# "reactor consumer" escape hatch (non-blocking toggle, `AsRawSocket`,
+# `From<OwnedSocket>`) that `platform-linux`/`platform-macos` both
+# gained specifically for this project -- see `socket/mod.rs`'s and
+# `socket/windows.rs`'s own docs. `windows-sys` is Microsoft's own
+# low-level FFI bindings, the same crate mio itself depends on for its
+# entire Windows backend (including the undocumented AFD-poll protocol
+# `io::reactor::windows` implements -- see that module's docs), so this
+# mirrors `libc`'s role on POSIX rather than introducing a new kind of
+# dependency.
+windows-sys = { version = "0.59", features = [
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Wdk_System_IO",
+] }
+
 [dev-dependencies]
 # Unconditional here (unlike the optional `[dependencies]` entry above)
 # so `tests/futures_io_compat.rs` can call the trait's methods directly
