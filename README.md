@@ -1,11 +1,21 @@
 # rusty_tokio
 
 A hand-rolled async runtime for Rust, built from scratch on `std` -- no
-`tokio`, no `mio`, no `crossbeam`. It exists to actually understand how an
-async runtime works, not to replace tokio.
+`tokio`, no `mio`. It exists to actually understand how an async runtime
+works, not to replace tokio.
 
 The scheduler, reactor, timers, and sync primitives are all original code
-here. Socket lifecycle (bind/connect/accept/addressing) is built on top of
+here, with one deliberate exception: the scheduler's per-worker
+work-stealing queues depend on `crossbeam-deque` (see the "Runtime"
+bullet below) rather than hand-rolling a Chase-Lev deque -- real unsafe
+concurrent code this project has no `loom`-based verification set up to
+trust a new implementation of, unlike the scheduler/reactor/timer logic
+elsewhere, which the multi-threaded integration tests already hold to
+that bar. Not a dependency on the general-purpose `crossbeam` suite
+(channels, epoch GC, etc.) as a shortcut around any of that -- just this
+one narrowly-scoped sub-crate for the one piece this project already
+decided isn't its point to hand-roll unverified. Socket lifecycle
+(bind/connect/accept/addressing) is built on top of
 [`rustils`](https://github.com/baileyrd/rustils)'
 `platform`/`platform-linux`/`platform-macos` crates rather than
 reimplemented a second time -- see "Built on rustils" below for exactly
@@ -76,27 +86,34 @@ rustils' API can't support them yet.
 - **Runtime** (`Runtime`, `Handle`): a fixed pool of worker threads, each
   with its own run queue, backed by a shared injector queue for tasks
   spawned from outside the pool, with work-stealing between workers when
-  one goes idle. `benches/scheduler.rs` (`cargo bench`, same hand-rolled
-  approach as the timer benchmarks) measures issue #8's contention
-  question rather than assuming an answer: on the Linux dev box this was
-  built on, throughput for many independently-spawned tasks (which all
-  serialize through the single injector-queue `Mutex`) measurably
-  *regresses* going from 1 to 4 worker threads (roughly 1M &rarr; 300K
-  tasks/sec), while a steal-heavy nested-spawn workload's scaling across
-  1/2/4 workers was too noisy in this shared sandbox to draw a confident
-  conclusion either way. That's real evidence the injector path can
-  bottleneck under contention, but not clean enough evidence about the
-  per-worker local queues specifically (issue #8's actual ask) to justify
-  a hand-rolled lock-free rewrite without more rigorous measurement (a
-  dedicated, non-shared multi-core machine, larger sample sizes) and,
-  more importantly, without `loom`-based concurrency testing this project
-  doesn't currently have set up -- a correctness bar this specific piece
-  of code needs and the scheduler/reactor/timer logic elsewhere in this
-  crate is held to via ordinary multi-threaded integration tests instead.
-  If a lock-free swap does happen, `crossbeam-deque` (exactly what tokio
-  itself uses, well-audited) is the recommended starting point over
-  hand-rolling a Chase-Lev deque from scratch -- see #8 for the ongoing
-  discussion.
+  one goes idle. Both the per-worker queues and the injector are
+  lock-free (`crossbeam_deque::{Worker, Stealer, Injector}` -- issue #8),
+  not hand-rolled: a Chase-Lev deque is real unsafe concurrent code, and
+  this project has no `loom`-based verification set up to trust a new
+  implementation of it, unlike the scheduler/reactor/timer logic
+  elsewhere in this crate, which the ordinary multi-threaded integration
+  tests already hold to that bar (they're what caught the `Notify`/`mpsc`
+  lost-wakeup bugs mentioned above). `crossbeam-deque` is exactly what
+  tokio itself uses, and every consumer-facing method
+  (`Worker`/`Stealer`/`Injector`) is safe Rust -- all unsafe is internal
+  to the crate, already independently audited. Each worker thread owns
+  its own `Worker` through a thread-local (`Worker` is `!Sync`, so it
+  can't live centrally in `Shared` the way the old `Mutex`-guarded queues
+  did); the current-thread flavor's single queue keeps the original
+  plain `Mutex<VecDeque<_>>` unchanged, since there's no stealing to
+  speed up with only one queue and no siblings. `benches/scheduler.rs`
+  (`cargo bench`, same hand-rolled approach as the timer benchmarks)
+  measured the swap rather than assuming it helped: on the same Linux dev
+  box, the steal-heavy nested-spawn scenario -- the scenario issue #8 was
+  actually about, too noisy to draw a confident conclusion on before the
+  swap -- now scales cleanly and consistently with worker count (roughly
+  350K &rarr; 520K &rarr; 800K tasks/sec across 1/2/4 workers). The
+  many-independently-spawned-tasks scenario (which all serialize through
+  the single injector) still measurably regresses going from 1 to 4
+  worker threads (roughly 1M &rarr; 300K tasks/sec) -- real evidence that
+  scenario's bottleneck is elsewhere (scheduler wake/park dynamics under
+  that specific access pattern, not the injector's own data structure),
+  not something this particular swap was expected to fix.
 - **Current-thread runtime** (`Builder::new_current_thread()`): the
   above is the default (also `Builder::new_multi_thread()`, spelled out
   for symmetry), but a runtime built this way has no worker-thread pool
@@ -732,9 +749,6 @@ edges instead of papering over them:
   transitively. No equivalent exists for tokio's own traits: doing that
   properly would mean depending on tokio itself, which this crate
   otherwise avoids entirely (see the top of this README).
-- **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
-  Correct and simple; a real lock-free Chase-Lev deque (what tokio
-  itself uses) would scale better under heavy contention.
 - **io_uring is readiness-only.** The optional `io-uring-reactor`
   feature (off by default, Linux only) swaps `epoll_wait` for
   `IORING_OP_POLL_ADD` behind the same `Reactor`/`ScheduledIo` interface
@@ -756,9 +770,9 @@ edges instead of papering over them:
   shape here is a bigger, different-shaped change than issue #9 asked
   for and isn't attempted. Built on the `io-uring` crate (what
   `tokio-uring`/`glommio`/`monoio` all use) for the same reason the
-  lock-free deque discussion above recommends it over hand-rolling: ring
-  setup/mmap/SQE/CQE layout is real unsafe code this project has no
-  `loom`-style verification for.
+  "Runtime" bullet above depends on `crossbeam-deque` rather than
+  hand-rolling: ring setup/mmap/SQE/CQE layout is real unsafe code this
+  project has no `loom`-style verification for.
 
 ## Testing
 

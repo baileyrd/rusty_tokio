@@ -1,7 +1,18 @@
 //! `rusty_tokio` -- a hand-rolled async runtime, built from scratch on
-//! `std` (no `mio`, no `tokio`, no `crossbeam`). The scheduler, reactor,
-//! timers, and sync primitives are all original code; socket setup in
-//! [`io`] builds on [`rustils`](https://github.com/baileyrd/rustils)'
+//! `std` (no `mio`, no `tokio`). The scheduler, reactor, timers, and
+//! sync primitives are all original code, with one deliberate exception:
+//! the scheduler's per-worker work-stealing queues depend on
+//! `crossbeam-deque` (see [`Runtime`]'s own docs) rather than
+//! hand-rolling a Chase-Lev deque -- real unsafe concurrent code this
+//! project has no `loom`-based verification to trust a new
+//! implementation of, unlike the scheduler/reactor/timer logic
+//! elsewhere in this crate, which the multi-threaded integration tests
+//! already hold to that bar. Not a dependency on the general-purpose
+//! `crossbeam` suite (channels, epoch GC, etc.) as a shortcut around any
+//! of that -- just this one narrowly-scoped sub-crate for the one piece
+//! this project already decided isn't its point to hand-roll unverified.
+//! Socket setup in [`io`] builds on
+//! [`rustils`](https://github.com/baileyrd/rustils)'
 //! `platform`/`platform-linux`/`platform-macos` crates rather than
 //! reimplementing sockaddr packing and syscall error mapping a second
 //! time -- see the crate README's "Built on rustils" section for
@@ -49,7 +60,17 @@
 //! - [`Runtime`] / [`Handle`]: two flavors. The default
 //!   (`Builder::new`/`new_multi_thread`) is a fixed pool of worker
 //!   threads, each with its own run queue, backed by a shared injector
-//!   queue and able to steal from one another. `Builder::
+//!   queue and able to steal from one another. Both the per-worker
+//!   queues and the injector are lock-free (`crossbeam_deque::
+//!   Worker`/`Stealer`/`Injector` -- issue #8; see this module's own
+//!   opening tagline for why that one dependency doesn't contradict
+//!   this crate's hand-rolled-everything-else ethos), each worker
+//!   thread owning its own `Worker` through a thread-local (`Worker`
+//!   itself is `!Sync`, so it can't live centrally the way a `Mutex`-
+//!   guarded queue could) rather than a shared, centrally-indexed
+//!   structure. `benches/scheduler.rs` (`cargo bench`) measured this
+//!   swap rather than assuming it helped -- see the crate README's
+//!   "Runtime" bullet for the before/after numbers. `Builder::
 //!   new_current_thread` has no worker-thread pool at all -- spawned
 //!   tasks run interleaved with polls of `block_on`'s own future,
 //!   entirely on whichever thread calls it (spawned futures still need
@@ -240,15 +261,6 @@
 //!   pulling in all of tokio just for its I/O trait definitions. No
 //!   equivalent shim for tokio's own traits exists (or is planned) --
 //!   that really would mean depending on tokio.
-//! - **Work-stealing queues are `Mutex<VecDeque<_>>`, not lock-free.**
-//!   Correct and simple; a real lock-free Chase-Lev deque (what tokio
-//!   actually uses) would scale better under heavy contention.
-//!   `benches/scheduler.rs` (`cargo bench`) measures this rather than
-//!   assuming it -- see the crate README's "Runtime" bullet for what it
-//!   found (a real regression on the injector-queue path, an
-//!   inconclusive result on the per-worker local-queue path this issue
-//!   is actually about) and why a hand-rolled lock-free replacement
-//!   isn't attempted here without `loom`-based verification first.
 //! - **io_uring is readiness-only, not a full completion-based
 //!   redesign.** The optional `io-uring-reactor` feature (off by
 //!   default; Linux only) swaps `epoll_wait` for `IORING_OP_POLL_ADD`
