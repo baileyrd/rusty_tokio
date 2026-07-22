@@ -1,3 +1,7 @@
+#![cfg(unix)]
+// `signal`'s own module is Unix-only (see `src/signal.rs`'s docs) --
+// gating this whole file rather than every individual item inside it.
+//
 // All scenarios below share a single `Runtime` and run inside one
 // `block_on`, deliberately -- `signal`'s own module docs note that its
 // process-wide state (the self-pipe, the reader task, the installed

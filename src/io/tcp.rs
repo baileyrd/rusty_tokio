@@ -1,20 +1,24 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
-use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo};
+use super::reactor::{
+    poll_io, ready_io, AsRawIo, Interest, OwnedIo, Reactor, ScheduledIo, TryCloneIo,
+};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // `PlatformTcpListener`/`PlatformTcpStream` are the only OS-specific
 // names in this file: rustils' concrete types cover bind/accept/
-// addressing/`set_nodelay` on both backends it has (`platform_linux` on
-// Linux, `platform_macos` on macOS -- see `socket/mod.rs`'s docs for
-// what stays hand-rolled on top of either one). Everything below this
-// point is identical logic regardless of which one it is.
+// addressing/`set_nodelay` on the two backends it has (`platform_linux`
+// on Linux, `platform_macos` on macOS -- see `socket/mod.rs`'s docs for
+// what stays hand-rolled on top of either one). On Windows, where
+// rustils has no net backend at all, `socket::windows`'s own hand-rolled
+// types provide the identical inherent-method surface directly (no
+// trait needed there -- see that module's own docs). Everything below
+// this point is identical logic regardless of which of the three it is.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use platform::net::{TcpListener as _, TcpStream as _};
 
@@ -26,6 +30,11 @@ use platform_linux::{
 #[cfg(target_os = "macos")]
 use platform_macos::{
     MacosTcpListener as PlatformTcpListener, MacosTcpStream as PlatformTcpStream,
+};
+
+#[cfg(target_os = "windows")]
+use socket::windows::{
+    WindowsTcpListener as PlatformTcpListener, WindowsTcpStream as PlatformTcpStream,
 };
 
 /// A non-blocking, epoll-driven TCP listener.
@@ -47,7 +56,7 @@ impl TcpListener {
         // The listener is created blocking; flip it non-blocking before
         // it's ever registered with the reactor or accepted from.
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpListener { inner, io, reactor })
     }
 
@@ -79,9 +88,9 @@ impl TcpListener {
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_std(listener: std::net::TcpListener) -> io::Result<TcpListener> {
         let reactor = Handle::current().shared.reactor.clone();
-        let inner = PlatformTcpListener::from(OwnedFd::from(listener));
+        let inner = PlatformTcpListener::from(OwnedIo::from(listener));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpListener { inner, io, reactor })
     }
 
@@ -106,14 +115,14 @@ impl TcpListener {
         self.inner
             .set_nonblocking(false)
             .map_err(from_platform_err)?;
-        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        let owned = self.inner.try_clone_io()?;
         Ok(std::net::TcpListener::from(owned))
     }
 }
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        self.reactor.deregister(self.inner.as_raw_fd());
+        self.reactor.deregister(self.inner.as_raw_io());
     }
 }
 
@@ -162,14 +171,14 @@ impl TcpStream {
     pub async fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_tcp_socket(addr)?;
-        socket::connect(fd.as_raw_fd(), addr)?;
-        let io = reactor.register(fd.as_raw_fd())?;
+        socket::connect(fd.as_raw_io(), addr)?;
+        let io = reactor.register(fd.as_raw_io())?;
         let inner = PlatformTcpStream::from(fd);
         // A non-blocking connect completes asynchronously; the socket
         // becoming writable is the signal to check whether it actually
         // succeeded.
         ready_io(&io, Interest::Write, || {
-            socket::take_socket_error(inner.as_raw_fd())
+            socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
         Ok(TcpStream { inner, io, reactor })
@@ -185,9 +194,9 @@ impl TcpStream {
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
-        let inner = PlatformTcpStream::from(OwnedFd::from(stream));
+        let inner = PlatformTcpStream::from(OwnedIo::from(stream));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpStream { inner, io, reactor })
     }
 
@@ -198,25 +207,25 @@ impl TcpStream {
         self.inner
             .set_nonblocking(false)
             .map_err(from_platform_err)?;
-        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        let owned = self.inner.try_clone_io()?;
         Ok(std::net::TcpStream::from(owned))
     }
 
     fn from_accepted(inner: PlatformTcpStream, reactor: Arc<Reactor>) -> io::Result<TcpStream> {
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpStream { inner, io, reactor })
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         ready_io(&self.io, Interest::Read, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
         .await
     }
 
     pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
         ready_io(&self.io, Interest::Write, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
         .await
     }
@@ -262,20 +271,20 @@ impl TcpStream {
 
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, Interest::Read, cx, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
     }
 
     fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, Interest::Write, cx, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
     }
 }
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        self.reactor.deregister(self.inner.as_raw_fd());
+        self.reactor.deregister(self.inner.as_raw_io());
     }
 }
 
@@ -311,7 +320,7 @@ impl AsyncWrite for &TcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(socket::shutdown_write(self.inner.as_raw_fd()))
+        Poll::Ready(socket::shutdown_write(self.inner.as_raw_io()))
     }
 }
 
@@ -416,7 +425,7 @@ impl AsyncWrite for OwnedWriteHalf {
 /// same sliver-of-raw-libc treatment `connect`/`take_socket_error`
 /// already get there.
 pub struct TcpSocket {
-    fd: OwnedFd,
+    fd: OwnedIo,
 }
 
 impl TcpSocket {
@@ -450,11 +459,11 @@ impl TcpSocket {
     /// lingering in `TIME_WAIT` from a previous listener on the same
     /// port, instead of failing with `EADDRINUSE`.
     pub fn set_reuseaddr(&self, reuse: bool) -> io::Result<()> {
-        socket::set_reuseaddr(self.fd.as_raw_fd(), reuse)
+        socket::set_reuseaddr(self.fd.as_raw_io(), reuse)
     }
 
     pub fn reuseaddr(&self) -> io::Result<bool> {
-        socket::reuseaddr(self.fd.as_raw_fd())
+        socket::reuseaddr(self.fd.as_raw_io())
     }
 
     /// `SO_REUSEPORT` -- lets multiple sockets bind to the exact same
@@ -462,15 +471,15 @@ impl TcpSocket {
     /// connections across them (a common multi-process/multi-thread
     /// listener pattern). Supported on both of this crate's targets.
     pub fn set_reuseport(&self, reuse: bool) -> io::Result<()> {
-        socket::set_reuseport(self.fd.as_raw_fd(), reuse)
+        socket::set_reuseport(self.fd.as_raw_io(), reuse)
     }
 
     pub fn reuseport(&self) -> io::Result<bool> {
-        socket::reuseport(self.fd.as_raw_fd())
+        socket::reuseport(self.fd.as_raw_io())
     }
 
     pub fn set_send_buffer_size(&self, size: u32) -> io::Result<()> {
-        socket::set_send_buffer_size(self.fd.as_raw_fd(), size)
+        socket::set_send_buffer_size(self.fd.as_raw_io(), size)
     }
 
     /// The kernel doesn't necessarily use exactly the size last
@@ -478,15 +487,15 @@ impl TcpSocket {
     /// (Linux, notably, doubles it) -- read this back to see what was
     /// actually applied.
     pub fn send_buffer_size(&self) -> io::Result<u32> {
-        socket::send_buffer_size(self.fd.as_raw_fd())
+        socket::send_buffer_size(self.fd.as_raw_io())
     }
 
     pub fn set_recv_buffer_size(&self, size: u32) -> io::Result<()> {
-        socket::set_recv_buffer_size(self.fd.as_raw_fd(), size)
+        socket::set_recv_buffer_size(self.fd.as_raw_io(), size)
     }
 
     pub fn recv_buffer_size(&self) -> io::Result<u32> {
-        socket::recv_buffer_size(self.fd.as_raw_fd())
+        socket::recv_buffer_size(self.fd.as_raw_io())
     }
 
     /// Binds to `addr`. Doesn't start listening yet -- see
@@ -495,7 +504,7 @@ impl TcpSocket {
     /// between, matching `bind(2)`/`listen(2)` already being separate
     /// syscalls at the OS level.
     pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
-        socket::bind(self.fd.as_raw_fd(), addr)
+        socket::bind(self.fd.as_raw_io(), addr)
     }
 
     /// Starts listening, turning this into an ordinary [`TcpListener`].
@@ -505,7 +514,7 @@ impl TcpSocket {
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
-        socket::listen(self.fd.as_raw_fd(), backlog)?;
+        socket::listen(self.fd.as_raw_io(), backlog)?;
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformTcpListener::from(self.fd);
         // Already non-blocking from `socket::new_tcp_socket` -- this is
@@ -513,7 +522,7 @@ impl TcpSocket {
         // reason `from_std` sets it explicitly too rather than trusting
         // the fd's existing state.
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpListener { inner, io, reactor })
     }
 
@@ -523,14 +532,14 @@ impl TcpSocket {
     /// Panics if called outside a running [`crate::Runtime`].
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
-        socket::connect(self.fd.as_raw_fd(), addr)?;
-        let io = reactor.register(self.fd.as_raw_fd())?;
+        socket::connect(self.fd.as_raw_io(), addr)?;
+        let io = reactor.register(self.fd.as_raw_io())?;
         let inner = PlatformTcpStream::from(self.fd);
         // A non-blocking connect completes asynchronously; the socket
         // becoming writable is the signal to check whether it actually
         // succeeded -- same as `TcpStream::connect`.
         ready_io(&io, Interest::Write, || {
-            socket::take_socket_error(inner.as_raw_fd())
+            socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
         Ok(TcpStream { inner, io, reactor })

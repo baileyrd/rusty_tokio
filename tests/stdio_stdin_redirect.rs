@@ -7,6 +7,14 @@
 //! `tests/*.rs` file is its own separate process, so keeping this test
 //! alone here is what actually guarantees that isolation, not anything
 //! `#[test]`-attribute-level.
+//!
+//! `Stdin` itself is cross-platform (`io::stdio` has no fd-specific code
+//! at all), but this test's *redirection mechanism* -- raw
+//! `pipe`/`dup`/`dup2` against the well-known small-integer fd `0` -- is
+//! POSIX-only; Windows has no equivalent notion of a stdin handle
+//! addressable that way. Gating the whole file rather than trying to
+//! find a Windows equivalent redirection trick for this one test.
+#![cfg(unix)]
 
 use rusty_tokio::io::{AsyncReadExt, Stdin};
 use rusty_tokio::Runtime;

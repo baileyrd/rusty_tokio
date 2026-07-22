@@ -1,3 +1,8 @@
+#![cfg(unix)]
+// `AF_UNIX` is Unix-only -- `UnixListener`/`UnixStream` are gated out of
+// `rusty_tokio::io` entirely on Windows (see `io/mod.rs`'s docs), so this
+// whole file is gated rather than every individual item.
+
 use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, UnixListener, UnixStream};
 use rusty_tokio::Runtime;
 

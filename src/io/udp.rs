@@ -1,14 +1,14 @@
-use super::reactor::{ready_io, Interest, Reactor, ScheduledIo};
+use super::reactor::{ready_io, AsRawIo, Interest, OwnedIo, Reactor, ScheduledIo, TryCloneIo};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::Arc;
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
 // (`platform_linux` on Linux, `platform_macos` on macOS), identical
-// logic below regardless of which.
+// logic below regardless of which; on Windows, `socket::windows`'s own
+// hand-rolled type.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use platform::net::UdpSocket as _;
 
@@ -17,6 +17,9 @@ use platform_linux::LinuxUdpSocket as PlatformUdpSocket;
 
 #[cfg(target_os = "macos")]
 use platform_macos::MacosUdpSocket as PlatformUdpSocket;
+
+#[cfg(target_os = "windows")]
+use socket::windows::WindowsUdpSocket as PlatformUdpSocket;
 
 /// A non-blocking, epoll-driven UDP socket. `bind`/`send_to`/
 /// `recv_from`/`local_addr` never block on their own (only readiness
@@ -35,7 +38,7 @@ impl UdpSocket {
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformUdpSocket::bind(addr).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UdpSocket { inner, io, reactor })
     }
 
@@ -64,13 +67,13 @@ impl UdpSocket {
     /// return `EINPROGRESS`) is reused directly: for UDP, its
     /// `EINPROGRESS` branch simply never triggers.
     pub fn connect(&self, addr: SocketAddr) -> io::Result<()> {
-        socket::connect(self.inner.as_raw_fd(), addr)
+        socket::connect(self.inner.as_raw_io(), addr)
     }
 
     /// Sends to whichever peer [`connect`](Self::connect) fixed.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         ready_io(&self.io, Interest::Write, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
         .await
     }
@@ -80,7 +83,7 @@ impl UdpSocket {
     /// socket.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         ready_io(&self.io, Interest::Read, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
         .await
     }
@@ -99,9 +102,9 @@ impl UdpSocket {
     /// Panics if called outside a running [`crate::Runtime`].
     pub fn from_std(socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
         let reactor = Handle::current().shared.reactor.clone();
-        let inner = PlatformUdpSocket::from(OwnedFd::from(socket));
+        let inner = PlatformUdpSocket::from(OwnedIo::from(socket));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UdpSocket { inner, io, reactor })
     }
 
@@ -112,13 +115,13 @@ impl UdpSocket {
         self.inner
             .set_nonblocking(false)
             .map_err(from_platform_err)?;
-        let owned = self.inner.as_fd().try_clone_to_owned()?;
+        let owned = self.inner.try_clone_io()?;
         Ok(std::net::UdpSocket::from(owned))
     }
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        self.reactor.deregister(self.inner.as_raw_fd());
+        self.reactor.deregister(self.inner.as_raw_io());
     }
 }

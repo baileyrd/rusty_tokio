@@ -1,7 +1,8 @@
 //! Deliberately the *only* test in this file -- see
 //! `tests/stdio_stdin_redirect.rs`'s own module docs for why a raw-fd
 //! redirection test needs to run alone in its process, not just alone
-//! within one `#[test]` at a time.
+//! within one `#[test]` at a time (including why it's POSIX-only, the
+//! same reasoning here).
 //!
 //! This is a best-effort, real-OS-scheduling-dependent check, not a
 //! guaranteed reproduction of a missing lock: it can only actually
@@ -12,6 +13,7 @@
 //! that a single `poll_write` call always reports the full length, never
 //! a partial count -- is checked directly and unconditionally in
 //! `tests/stdio.rs`'s `a_single_write_call_always_reports_the_full_length_never_partial`.
+#![cfg(unix)]
 
 use rusty_tokio::io::AsyncWriteExt;
 use rusty_tokio::Runtime;
