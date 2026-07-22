@@ -1,10 +1,13 @@
-//! Hand-rolled scheduler benchmarks -- issue #8 asks whether the
-//! work-stealing queues' `Mutex<VecDeque<_>>` design (correct and
-//! simple, but every push/pop/steal takes a lock) is actually a
+//! Hand-rolled scheduler benchmarks -- issue #8 asked whether the
+//! work-stealing queues' original `Mutex<VecDeque<_>>` design (correct
+//! and simple, but every push/pop/steal took a lock) was actually a
 //! bottleneck before reaching for a lock-free replacement, rather than
-//! "optimizing blind." No `criterion` here either, matching
-//! `benches/timers.rs`'s approach: a plain `harness = false` binary,
-//! run with `cargo bench`, always in `--release`.
+//! "optimizing blind" -- and, once `crossbeam_deque::{Worker, Stealer,
+//! Injector}` replaced it (see `Runtime`'s own crate-doc bullet), this
+//! same benchmark measures whether the swap actually helped. No
+//! `criterion` here either, matching `benches/timers.rs`'s approach: a
+//! plain `harness = false` binary, run with `cargo bench`, always in
+//! `--release`.
 //!
 //! `Shared`'s local/injector queues are `pub(crate)`, so -- like the
 //! timer benchmarks -- this can only measure end-to-end throughput
