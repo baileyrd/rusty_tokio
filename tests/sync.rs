@@ -1,4 +1,4 @@
-use rusty_tokio::sync::{mpsc, oneshot, Mutex, Notify, OnceCell, RwLock, Semaphore};
+use rusty_tokio::sync::{mpsc, oneshot, Mutex, MutexGuard, Notify, OnceCell, RwLock, Semaphore};
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -26,6 +26,86 @@ fn mutex_serializes_increments() {
             h.await.unwrap();
         }
         assert_eq!(*mutex.lock().await, 500);
+    });
+}
+
+#[test]
+fn mutex_lock_owned_serializes_increments_across_spawned_tasks() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let mutex = Arc::new(Mutex::new(0u64));
+        let mut handles = Vec::new();
+        for _ in 0..500 {
+            let mutex = mutex.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let mut guard = mutex.lock_owned().await;
+                let cur = *guard;
+                rusty_tokio::time::sleep(Duration::from_micros(1)).await;
+                *guard = cur + 1;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(*mutex.lock().await, 500);
+    });
+}
+
+#[test]
+fn mutex_try_lock_owned_fails_while_held_then_succeeds_after_release() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mutex = Arc::new(Mutex::new(1));
+        let guard = mutex.try_lock_owned().unwrap();
+        assert!(mutex.try_lock_owned().is_none());
+        drop(guard);
+        assert!(mutex.try_lock_owned().is_some());
+    });
+}
+
+#[test]
+fn mutex_guard_map_projects_a_field_and_still_releases_on_drop() {
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mutex = Mutex::new(Pair { a: 1, b: 2 });
+
+        {
+            let guard = mutex.lock().await;
+            let mut mapped = MutexGuard::map(guard, |pair| &mut pair.a);
+            *mapped += 10;
+        }
+
+        // The mapped guard's `Drop` must have released the lock --
+        // otherwise this would hang forever.
+        let guard = mutex.lock().await;
+        assert_eq!(guard.a, 11);
+        assert_eq!(guard.b, 2);
+    });
+}
+
+#[test]
+fn owned_mutex_guard_map_projects_a_field_and_still_releases_on_drop() {
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mutex = Arc::new(Mutex::new(Pair { a: 1, b: 2 }));
+
+        {
+            let guard = mutex.lock_owned().await;
+            let mut mapped = rusty_tokio::sync::OwnedMutexGuard::map(guard, |pair| &mut pair.b);
+            *mapped += 10;
+        }
+
+        let guard = mutex.lock_owned().await;
+        assert_eq!(guard.a, 1);
+        assert_eq!(guard.b, 12);
     });
 }
 
