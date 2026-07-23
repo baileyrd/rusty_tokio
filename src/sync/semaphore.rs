@@ -44,7 +44,35 @@ pub struct Semaphore {
 }
 
 impl Semaphore {
+    /// The largest number of permits a single `Semaphore` can hold.
+    ///
+    /// Matches tokio's own constant (`usize::MAX >> 3`) for parity, even
+    /// though this crate's `Semaphore` doesn't itself pack extra state
+    /// into the same word the way tokio's atomic-counter implementation
+    /// does -- there's no technical reason a plain `Mutex<State>`-backed
+    /// count couldn't go higher, but there's also no reason for a
+    /// well-behaved caller to ever need more permits than this.
+    pub const MAX_PERMITS: usize = usize::MAX >> 3;
+
     pub fn new(permits: usize) -> Self {
+        assert!(
+            permits <= Self::MAX_PERMITS,
+            "a Semaphore cannot be created with more than Semaphore::MAX_PERMITS permits"
+        );
+        Semaphore {
+            state: StdMutex::new(State {
+                permits,
+                waiters: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// Like [`new`](Self::new), but usable in a `const` context (e.g. a
+    /// `static Semaphore`) -- skips the `MAX_PERMITS` assertion `new`
+    /// makes, since panicking isn't available at const-eval time here;
+    /// a `permits` value this crate itself would never construct is the
+    /// caller's own responsibility to avoid.
+    pub const fn const_new(permits: usize) -> Self {
         Semaphore {
             state: StdMutex::new(State {
                 permits,
@@ -55,6 +83,19 @@ impl Semaphore {
 
     pub fn available_permits(&self) -> usize {
         self.state.lock().unwrap().permits
+    }
+
+    /// Permanently removes up to `n` permits, without ever needing to
+    /// release them back later -- unlike acquiring and then dropping a
+    /// permit without holding it for anything, this never grants (and
+    /// thus never wakes) any queued waiter. Returns how many permits
+    /// were actually forgotten, which is `n` unless fewer than `n` were
+    /// available, in which case it's however many were.
+    pub fn forget_permits(&self, n: usize) -> usize {
+        let mut guard = self.state.lock().unwrap();
+        let forgotten = n.min(guard.permits);
+        guard.permits -= forgotten;
+        forgotten
     }
 
     /// Adds `n` permits to the semaphore's capacity, waking any queued
