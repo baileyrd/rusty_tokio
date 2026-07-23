@@ -88,7 +88,13 @@ impl<T> Mutex<T> {
 
     /// Locks without waiting, failing if it's currently held.
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.try_acquire().then_some(MutexGuard { mutex: self })
+        // `then` (lazy), not `then_some`: `then_some`'s argument is
+        // eagerly constructed regardless of the bool, and a guard's
+        // `Drop` unconditionally releases -- constructing one here even
+        // on the `false` path would release a lock this call never
+        // actually acquired, corrupting `locked` for whoever really
+        // holds it.
+        self.try_acquire().then(|| MutexGuard { mutex: self })
     }
 
     /// Like [`lock`](Self::lock), but the returned guard owns an `Arc`
