@@ -18,5 +18,8 @@ pub use barrier::{Barrier, BarrierWaitResult};
 pub use mutex::{MappedMutexGuard, Mutex, MutexGuard, OwnedMappedMutexGuard, OwnedMutexGuard};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, SetError};
-pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use rwlock::{
+    OwnedRwLockMappedWriteGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
+    RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard,
+};
 pub use semaphore::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};

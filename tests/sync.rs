@@ -64,6 +64,21 @@ fn mutex_try_lock_owned_fails_while_held_then_succeeds_after_release() {
 }
 
 #[test]
+fn mutex_try_lock_failing_does_not_corrupt_the_real_holders_lock() {
+    // Regression test: `try_lock`'s failure path must not construct
+    // (and then implicitly drop-release) a `MutexGuard` it never
+    // actually acquired -- doing so would erroneously mark the mutex
+    // unlocked while the real holder below still thinks it holds it,
+    // letting a second `try_lock` wrongly succeed at the same time.
+    let mutex = Mutex::new(1);
+    let held = mutex.try_lock().unwrap();
+    assert!(mutex.try_lock().is_none(), "first failed attempt");
+    assert!(mutex.try_lock().is_none(), "second failed attempt");
+    drop(held);
+    assert!(mutex.try_lock().is_some());
+}
+
+#[test]
 fn mutex_guard_map_projects_a_field_and_still_releases_on_drop() {
     struct Pair {
         a: u32,
@@ -229,6 +244,173 @@ fn rwlock_try_read_and_try_write() {
         lock.try_read().is_none(),
         "try_read should fail while the writer is held"
     );
+}
+
+#[test]
+fn rwlock_read_owned_allows_concurrent_readers_across_spawned_tasks() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let lock = Arc::new(RwLock::new(5));
+    rt.block_on(async {
+        let (tx1, rx1) = oneshot::channel::<()>();
+        let (tx2, rx2) = oneshot::channel::<()>();
+
+        let l1 = lock.clone();
+        let h1 = rusty_tokio::spawn(async move {
+            let _g = l1.read_owned().await;
+            let _ = tx1.send(());
+            rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let l2 = lock.clone();
+        let h2 = rusty_tokio::spawn(async move {
+            let _g = l2.read_owned().await;
+            let _ = tx2.send(());
+            rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        // Both readers should be able to acquire concurrently -- if
+        // read_owned actually excluded, one of these would never fire
+        // until the other's sleep finished.
+        rx1.await.unwrap();
+        rx2.await.unwrap();
+        h1.await.unwrap();
+        h2.await.unwrap();
+    });
+}
+
+#[test]
+fn rwlock_write_owned_serializes_increments_across_spawned_tasks() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let lock = Arc::new(RwLock::new(0u64));
+        let mut handles = Vec::new();
+        for _ in 0..200 {
+            let lock = lock.clone();
+            handles.push(rusty_tokio::spawn(async move {
+                let mut guard = lock.write_owned().await;
+                let cur = *guard;
+                rusty_tokio::time::sleep(Duration::from_micros(1)).await;
+                *guard = cur + 1;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(*lock.read().await, 200);
+    });
+}
+
+#[test]
+fn rwlock_try_read_owned_and_try_write_owned() {
+    let lock = Arc::new(RwLock::new(5));
+    let r = lock.try_read_owned().unwrap();
+    assert_eq!(*r, 5);
+    assert!(lock.try_write_owned().is_none());
+    drop(r);
+
+    let mut w = lock.try_write_owned().unwrap();
+    *w = 10;
+    assert!(lock.try_read_owned().is_none());
+}
+
+#[test]
+fn rwlock_write_guard_map_projects_a_field_and_still_releases_on_drop() {
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock = RwLock::new(Pair { a: 1, b: 2 });
+
+        {
+            let guard = lock.write().await;
+            let mut mapped = rusty_tokio::sync::RwLockWriteGuard::map(guard, |pair| &mut pair.a);
+            *mapped += 10;
+        }
+
+        let guard = lock.read().await;
+        assert_eq!(guard.a, 11);
+        assert_eq!(guard.b, 2);
+    });
+}
+
+#[test]
+fn rwlock_owned_write_guard_map_projects_a_field_and_still_releases_on_drop() {
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock = Arc::new(RwLock::new(Pair { a: 1, b: 2 }));
+
+        {
+            let guard = lock.write_owned().await;
+            let mut mapped =
+                rusty_tokio::sync::OwnedRwLockWriteGuard::map(guard, |pair| &mut pair.b);
+            *mapped += 10;
+        }
+
+        let guard = lock.read_owned().await;
+        assert_eq!(guard.a, 1);
+        assert_eq!(guard.b, 12);
+    });
+}
+
+#[test]
+fn rwlock_write_guard_downgrade_lets_other_readers_in_but_not_a_queued_writer() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    let lock = Arc::new(RwLock::new(1));
+    rt.block_on(async {
+        let write_guard = lock.write().await;
+        let read_guard = write_guard.downgrade();
+        assert_eq!(*read_guard, 1);
+
+        // Another reader should be able to join immediately.
+        let lock2 = lock.clone();
+        let other_reader = rusty_tokio::spawn(async move {
+            let g = lock2.read().await;
+            *g
+        });
+        assert_eq!(other_reader.await.unwrap(), 1);
+
+        // A writer queued behind the still-held read guard must not
+        // proceed until it drops.
+        let lock3 = lock.clone();
+        let writer_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer_ran2 = writer_ran.clone();
+        let writer = rusty_tokio::spawn(async move {
+            let mut g = lock3.write().await;
+            writer_ran2.store(true, Ordering::SeqCst);
+            *g = 2;
+        });
+        rusty_tokio::task::yield_now().await;
+        assert!(!writer_ran.load(Ordering::SeqCst));
+
+        drop(read_guard);
+        writer.await.unwrap();
+        assert!(writer_ran.load(Ordering::SeqCst));
+        assert_eq!(*lock.read().await, 2);
+    });
+}
+
+#[test]
+fn rwlock_owned_write_guard_downgrade_produces_a_working_owned_read_guard() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let lock = Arc::new(RwLock::new(7));
+        let write_guard = lock.write_owned().await;
+        let read_guard = write_guard.downgrade();
+        assert_eq!(*read_guard, 7);
+        drop(read_guard);
+
+        // The lock must be fully released -- a fresh write should
+        // succeed without hanging.
+        let mut w = lock.write_owned().await;
+        *w = 8;
+        drop(w);
+        assert_eq!(*lock.read_owned().await, 8);
+    });
 }
 
 #[test]
