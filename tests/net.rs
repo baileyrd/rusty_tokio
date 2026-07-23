@@ -392,6 +392,15 @@ fn udp_ttl_set_and_read_back() {
 }
 
 #[test]
+fn udp_take_error_is_none_on_a_fresh_socket() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        assert!(socket.take_error().unwrap().is_none());
+    });
+}
+
+#[test]
 fn udp_tos_v4_set_and_read_back() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {

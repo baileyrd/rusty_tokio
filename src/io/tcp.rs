@@ -385,6 +385,14 @@ impl TcpStream {
         self.inner.local_addr().map_err(from_platform_err)
     }
 
+    /// `SO_ERROR` -- any pending error the OS has recorded for this
+    /// socket but not yet reported (`Ok(None)` if there isn't one).
+    /// Reading it clears it, so a second immediate call reports
+    /// `Ok(None)` even if the first found something.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        socket::take_error(self.inner.as_raw_io())
+    }
+
     /// Waits for this stream to become readable -- see this crate's
     /// `io` module docs (or [`ready`](Self::ready)) for using this
     /// together with your own non-blocking I/O via
@@ -905,6 +913,12 @@ impl TcpSocket {
 
     pub fn tclass_v6(&self) -> io::Result<u32> {
         socket::tclass_v6(self.fd.as_raw_io())
+    }
+
+    /// `SO_ERROR` -- see [`TcpStream::take_error`] for the full
+    /// contract, identical here.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        socket::take_error(self.fd.as_raw_io())
     }
 
     /// Adopts an already-connected `std` stream as a bare [`TcpSocket`]

@@ -362,8 +362,24 @@ pub(crate) fn connect(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
 /// whether a non-blocking `connect` that just became writable actually
 /// succeeded, or failed asynchronously (e.g. connection refused). Not
 /// exposed by rustils, which never needs it (its own `connect` is
-/// synchronous and reports failure directly).
+/// synchronous and reports failure directly). Collapses [`take_error`]'s
+/// `Option` into the pending error itself, for callers (this crate's
+/// own non-blocking connect) that only care about propagating it as a
+/// failure, not distinguishing "no pending error" from "no error to
+/// report yet" the way the public, non-consuming [`take_error`] does.
 pub(crate) fn take_socket_error(fd: RawFd) -> io::Result<()> {
+    match take_error(fd)? {
+        None => Ok(()),
+        Some(err) => Err(err),
+    }
+}
+
+/// The reverse framing of [`take_socket_error`]: `Ok(None)` if there's
+/// no pending socket error, `Ok(Some(err))` if there was one (reading
+/// `SO_ERROR` clears it -- the standard getsockopt semantics, so a
+/// second immediate call reports `Ok(None)`), and `Err(..)` only if the
+/// `getsockopt` call itself failed outright.
+pub(crate) fn take_error(fd: RawFd) -> io::Result<Option<io::Error>> {
     let mut err: c_int = 0;
     let mut len = mem::size_of::<c_int>() as socklen_t;
     // SAFETY: `&mut err`/`&mut len` are valid, exclusively borrowed
@@ -378,9 +394,9 @@ pub(crate) fn take_socket_error(fd: RawFd) -> io::Result<()> {
         )
     })?;
     if err == 0 {
-        Ok(())
+        Ok(None)
     } else {
-        Err(io::Error::from_raw_os_error(err))
+        Ok(Some(io::Error::from_raw_os_error(err)))
     }
 }
 

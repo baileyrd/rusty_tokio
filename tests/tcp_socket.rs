@@ -232,6 +232,35 @@ fn tclass_v6_set_and_read_back() {
 }
 
 #[test]
+fn tcp_socket_take_error_is_none_on_a_fresh_socket() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = TcpSocket::new_v4().unwrap();
+        assert!(socket.take_error().unwrap().is_none());
+    });
+}
+
+#[test]
+fn tcp_stream_take_error_is_none_on_a_healthy_connection() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        assert!(client.take_error().unwrap().is_none());
+
+        let stream = server.await.unwrap();
+        assert!(stream.take_error().unwrap().is_none());
+    });
+}
+
+#[test]
 fn tcp_stream_nodelay_getter_reflects_the_setter() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
