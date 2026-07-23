@@ -515,3 +515,60 @@ fn symlink_creates_a_link_and_read_link_reports_its_target() {
     std::fs::remove_file(&link).unwrap();
     std::fs::remove_file(&target).unwrap();
 }
+
+#[test]
+fn read_returns_the_whole_file_in_one_call() {
+    let path = temp_path("whole-file-read");
+    std::fs::write(&path, b"0123456789").unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let contents = rusty_tokio::fs::read(&path).await.unwrap();
+        assert_eq!(contents, b"0123456789");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn read_to_string_returns_the_whole_file_as_a_string() {
+    let path = temp_path("whole-file-read-to-string");
+    std::fs::write(&path, "hello, whole file").unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let contents = rusty_tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(contents, "hello, whole file");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn read_to_string_fails_with_invalid_data_on_non_utf8_bytes() {
+    let path = temp_path("whole-file-read-to-string-invalid");
+    std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let err = rusty_tokio::fs::read_to_string(&path).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn write_creates_and_truncates_the_file_in_one_call() {
+    let path = temp_path("whole-file-write");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::write(&path, b"first write, much longer than the second")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"first write, much longer than the second"
+        );
+
+        // A second write truncates rather than appending or leaving
+        // leftover bytes from the longer first write.
+        rusty_tokio::fs::write(&path, b"second").await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
