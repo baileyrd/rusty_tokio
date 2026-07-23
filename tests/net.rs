@@ -368,6 +368,19 @@ fn udp_multicast_ttl_v4_set_and_read_back() {
     });
 }
 
+#[test]
+fn udp_broadcast_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        assert!(!socket.broadcast().unwrap());
+        socket.set_broadcast(true).unwrap();
+        assert!(socket.broadcast().unwrap());
+        socket.set_broadcast(false).unwrap();
+        assert!(!socket.broadcast().unwrap());
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn udp_multicast_v4_round_trip_over_loopback() {
