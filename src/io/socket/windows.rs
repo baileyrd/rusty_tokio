@@ -282,6 +282,63 @@ pub(crate) fn write(sock: RawSocket, buf: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// Genuine scatter-read via `WSARecv` -- fills as many of `bufs` as one
+/// kernel call returns data for, rather than the "just the first
+/// buffer" shortcut a naive vectored read might take.
+pub(crate) fn readv(sock: RawSocket, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+    let mut received: u32 = 0;
+    let mut flags: u32 = 0;
+    let count = bufs.len().min(u32::MAX as usize) as u32;
+    // SAFETY: `IoSliceMut` is guaranteed to have the same memory layout
+    // as `WSABUF` on Windows (the whole reason it exists); `bufs` is
+    // valid for `count` entries for the call's duration; `sock` is
+    // caller-owned and open. `lpOverlapped`/the completion routine are
+    // both null/`None` -- this is a plain synchronous call on an
+    // already-non-blocking socket, the same shape `read`/`write` above
+    // already use.
+    let r = unsafe {
+        WinSock::WSARecv(
+            sock as SOCKET,
+            bufs.as_mut_ptr().cast(),
+            count,
+            &mut received,
+            &mut flags,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if r == WinSock::SOCKET_ERROR {
+        Err(wsa_error())
+    } else {
+        Ok(received as usize)
+    }
+}
+
+/// The write-side counterpart of [`readv`], via `WSASend`.
+pub(crate) fn writev(sock: RawSocket, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+    let mut sent: u32 = 0;
+    let count = bufs.len().min(u32::MAX as usize) as u32;
+    // SAFETY: see `readv` above -- `IoSlice` has the identical guarantee.
+    // `WSASend` doesn't mutate the buffers, but `WSABUF` has no
+    // const/mut distinction, hence the cast.
+    let r = unsafe {
+        WinSock::WSASend(
+            sock as SOCKET,
+            bufs.as_ptr().cast_mut().cast(),
+            count,
+            &mut sent,
+            0,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if r == WinSock::SOCKET_ERROR {
+        Err(wsa_error())
+    } else {
+        Ok(sent as usize)
+    }
+}
+
 /// Like [`read`], but via `recv` with `MSG_PEEK` -- the bytes stay in
 /// the socket's receive queue for the next real `recv` call.
 pub(crate) fn peek(sock: RawSocket, buf: &mut [u8]) -> io::Result<usize> {

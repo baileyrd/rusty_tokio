@@ -284,6 +284,39 @@ impl UnixStream {
         readiness::try_io(&self.io, interest, f)
     }
 
+    /// Reads without waiting, failing immediately (with `WouldBlock`)
+    /// if nothing's available yet.
+    pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_io(Interest::READABLE, || {
+            socket::read(self.inner.as_raw_fd(), buf)
+        })
+    }
+
+    /// Writes without waiting, failing immediately (with `WouldBlock`)
+    /// if the socket isn't ready to accept more right now.
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.try_io(Interest::WRITABLE, || {
+            socket::write(self.inner.as_raw_fd(), buf)
+        })
+    }
+
+    /// Like [`try_read`](Self::try_read), but scatters into every
+    /// buffer in `bufs` in one `readv(2)` call, rather than only ever
+    /// filling the first one.
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.try_io(Interest::READABLE, || {
+            socket::readv(self.inner.as_raw_fd(), bufs)
+        })
+    }
+
+    /// Like [`try_write`](Self::try_write), but gathers from every
+    /// buffer in `bufs` in one `writev(2)` call.
+    pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.try_io(Interest::WRITABLE, || {
+            socket::writev(self.inner.as_raw_fd(), bufs)
+        })
+    }
+
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, ReactorInterest::Read, cx, || {
             socket::read(self.inner.as_raw_fd(), buf)
@@ -402,6 +435,26 @@ pub struct UnixReadHalf<'a>(&'a UnixStream);
 /// Borrowed write half of a [`UnixStream`], created by [`UnixStream::split`].
 pub struct UnixWriteHalf<'a>(&'a UnixStream);
 
+impl UnixReadHalf<'_> {
+    pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.try_read(buf)
+    }
+
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.try_read_vectored(bufs)
+    }
+}
+
+impl UnixWriteHalf<'_> {
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.try_write(buf)
+    }
+
+    pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.0.try_write_vectored(bufs)
+    }
+}
+
 impl AsyncRead for UnixReadHalf<'_> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -433,6 +486,26 @@ pub struct OwnedUnixReadHalf(Arc<UnixStream>);
 /// Owned write half of a [`UnixStream`], created by
 /// [`UnixStream::into_split`].
 pub struct OwnedUnixWriteHalf(Arc<UnixStream>);
+
+impl OwnedUnixReadHalf {
+    pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.try_read(buf)
+    }
+
+    pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.try_read_vectored(bufs)
+    }
+}
+
+impl OwnedUnixWriteHalf {
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.try_write(buf)
+    }
+
+    pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.0.try_write_vectored(bufs)
+    }
+}
 
 impl AsyncRead for OwnedUnixReadHalf {
     fn poll_read(
