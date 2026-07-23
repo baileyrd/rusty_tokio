@@ -778,3 +778,129 @@ fn open_options_custom_flags_ors_in_extra_open_flags() {
     });
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn read_dir_lists_files_and_subdirectories() {
+    let root = temp_path("read-dir-basic");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.txt"), b"a").unwrap();
+    std::fs::write(root.join("b.txt"), b"bb").unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut names = Vec::new();
+        let mut dir = rusty_tokio::fs::read_dir(&root).await.unwrap();
+        while let Some(entry) = dir.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+            assert_eq!(entry.path(), root.join(entry.file_name()));
+        }
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
+    });
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn read_dir_reports_file_type_and_metadata() {
+    let root = temp_path("read-dir-metadata");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file.txt"), b"hello").unwrap();
+    std::fs::create_dir(root.join("subdir")).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut dir = rusty_tokio::fs::read_dir(&root).await.unwrap();
+        let mut saw_file = false;
+        let mut saw_dir = false;
+        while let Some(entry) = dir.next_entry().await.unwrap() {
+            let file_type = entry.file_type().await.unwrap();
+            let metadata = entry.metadata().await.unwrap();
+            assert_eq!(file_type.is_dir(), metadata.is_dir());
+            if entry.file_name() == "file.txt" {
+                assert!(file_type.is_file());
+                assert_eq!(metadata.len(), 5);
+                saw_file = true;
+            } else if entry.file_name() == "subdir" {
+                assert!(file_type.is_dir());
+                saw_dir = true;
+            }
+        }
+        assert!(saw_file && saw_dir);
+    });
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn read_dir_exhaustion_reports_none_and_stays_none() {
+    let root = temp_path("read-dir-empty");
+    std::fs::create_dir(&root).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut dir = rusty_tokio::fs::read_dir(&root).await.unwrap();
+        assert!(dir.next_entry().await.unwrap().is_none());
+        // Stays exhausted rather than erroring or panicking on a second
+        // call past the end.
+        assert!(dir.next_entry().await.unwrap().is_none());
+    });
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn read_dir_handles_more_entries_than_one_chunk() {
+    let root = temp_path("read-dir-chunking");
+    std::fs::create_dir(&root).unwrap();
+    // More than `CHUNK_SIZE` (32) entries, to exercise the multi-batch
+    // `spawn_blocking` path rather than just a single round trip.
+    for i in 0..75 {
+        std::fs::write(root.join(format!("entry-{i:03}")), b"x").unwrap();
+    }
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut count = 0;
+        let mut dir = rusty_tokio::fs::read_dir(&root).await.unwrap();
+        while dir.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 75);
+    });
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn read_dir_on_a_missing_directory_reports_not_found() {
+    let path = temp_path("read-dir-missing");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let Err(err) = rusty_tokio::fs::read_dir(&path).await else {
+            panic!("expected read_dir to fail on a missing directory");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn read_dir_entry_ino_matches_the_entrys_own_metadata() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = temp_path("read-dir-ino");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("f"), b"x").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut dir = rusty_tokio::fs::read_dir(&root).await.unwrap();
+        let entry = dir.next_entry().await.unwrap().unwrap();
+        let expected_ino = std::fs::metadata(entry.path()).unwrap().ino();
+        assert_eq!(entry.ino(), expected_ino);
+    });
+
+    std::fs::remove_dir_all(&root).unwrap();
+}

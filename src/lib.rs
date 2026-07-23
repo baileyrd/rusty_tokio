@@ -162,7 +162,8 @@
 //!   no portable non-blocking `getaddrinfo`, so this is another
 //!   [`spawn_blocking`] round trip under the hood, the same shape
 //!   `fs::File`/`io::stdio`/`process::Child::wait` already use.
-//! - [`fs`]: [`fs::File`], [`fs::OpenOptions`], and [`fs::DirBuilder`]. A regular file
+//! - [`fs`]: [`fs::File`], [`fs::OpenOptions`], [`fs::DirBuilder`], and
+//!   [`fs::read_dir`]. A regular file
 //!   can't be registered with a reactor's readiness model the way a
 //!   socket can -- the kernel considers it always "ready", and the real
 //!   latency happens synchronously inside the `read`/`write`/`lseek`
