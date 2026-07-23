@@ -192,3 +192,58 @@ fn a_live_listener_rejects_a_second_bind_at_the_same_path() {
     });
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn unix_stream_raw_fd_roundtrip_preserves_functionality() {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("stream_raw_fd");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        assert!(client.as_raw_fd() >= 0);
+        let fd = client.into_raw_fd();
+        let client = unsafe { UnixStream::from_raw_fd(fd) };
+
+        client.write_all(b"roundtrip").await.unwrap();
+        let mut buf = [0u8; 64];
+        client.read_exact(&mut buf[..9]).await.unwrap();
+        assert_eq!(&buf[..9], b"roundtrip");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unix_listener_raw_fd_roundtrip_can_still_accept() {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("listener_raw_fd");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+        let fd = listener.into_raw_fd();
+        let listener = unsafe { UnixListener::from_raw_fd(fd) };
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"still works");
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        client.write_all(b"still works").await.unwrap();
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
