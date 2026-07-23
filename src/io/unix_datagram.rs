@@ -68,6 +68,21 @@ impl UnixDatagram {
         Ok(UnixDatagram { inner, io, reactor })
     }
 
+    /// Adopts an already-created `SOCK_DGRAM` fd -- backs
+    /// [`super::UnixSocket::datagram`], which hands over a bare fd
+    /// that's already the right socket type but not yet registered with
+    /// the reactor.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub(crate) fn from_owned_fd(fd: std::os::fd::OwnedFd) -> io::Result<UnixDatagram> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = std::os::unix::net::UnixDatagram::from(fd);
+        inner.set_nonblocking(true)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(UnixDatagram { inner, io, reactor })
+    }
+
     pub async fn send_to(&self, buf: &[u8], path: impl AsRef<Path>) -> io::Result<usize> {
         let path = path.as_ref();
         ready_io(&self.io, Interest::Write, || self.inner.send_to(buf, path)).await
