@@ -3,7 +3,7 @@
 // `rusty_tokio::io` entirely on Windows (see `io/mod.rs`'s docs), so this
 // whole file is gated rather than every individual item.
 
-use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, UnixListener, UnixStream};
+use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, UnixListener, UnixSocketAddr, UnixStream};
 use rusty_tokio::Runtime;
 
 fn temp_socket_path(name: &str) -> std::path::PathBuf {
@@ -134,13 +134,19 @@ fn unix_owned_halves_as_ref_exposes_the_underlying_stream() {
         let client = UnixStream::connect(&path).await.unwrap();
         let (read_half, write_half) = client.into_split();
 
+        // A connecting client never `bind`s its own end, so both halves'
+        // local address is the unnamed address -- `UnixSocketAddr`
+        // itself isn't `PartialEq` (nor is the `std::os::unix::net::
+        // SocketAddr` it wraps), so this checks `is_unnamed()` rather
+        // than comparing the two addresses directly.
         let read_local = AsRef::<UnixStream>::as_ref(&read_half)
             .local_addr()
             .unwrap();
         let write_local = AsRef::<UnixStream>::as_ref(&write_half)
             .local_addr()
             .unwrap();
-        assert_eq!(read_local, write_local);
+        assert!(read_local.is_unnamed());
+        assert!(write_local.is_unnamed());
     });
     let _ = std::fs::remove_file(&path);
 }
@@ -195,6 +201,87 @@ fn unix_echo_roundtrip() {
         server.await.unwrap();
     });
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn bind_addr_then_connect_addr_round_trip_over_a_pathname() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("bind-addr-pathname");
+    rt.block_on(async {
+        let addr = UnixSocketAddr::from_pathname(&path).unwrap();
+        assert_eq!(addr.as_pathname(), Some(path.as_path()));
+        assert!(!addr.is_unnamed());
+
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap().as_pathname(),
+            Some(path.as_path())
+        );
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let addr = UnixSocketAddr::from_pathname(&path).unwrap();
+        let client = UnixStream::connect_addr(&addr).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn bind_addr_then_connect_addr_round_trip_over_an_abstract_name() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // Unique per test run (and per repeated run of this same test)
+        // the same way `temp_socket_path` is for real filesystem paths --
+        // an abstract name is a global, kernel-wide namespace, not
+        // scoped to a directory the way a temp path is.
+        let name = format!(
+            "rusty_tokio-test-abstract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let addr = UnixSocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        assert_eq!(addr.as_abstract_name(), Some(name.as_bytes()));
+        assert_eq!(addr.as_pathname(), None);
+        assert!(!addr.is_unnamed());
+
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap().as_abstract_name(),
+            Some(name.as_bytes())
+        );
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let addr = UnixSocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let client = UnixStream::connect_addr(&addr).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        server.await.unwrap();
+    });
 }
 
 #[test]

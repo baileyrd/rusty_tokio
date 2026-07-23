@@ -6,7 +6,7 @@ use super::socket::{self, from_platform_err};
 use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,11 +16,13 @@ use std::task::{Context, Poll};
 // (`platform_linux` on Linux, `platform_macos` on macOS), identical logic
 // below regardless of which -- both shaped identically to their TCP
 // counterparts, minus `set_nodelay` (no Nagle buffering on `AF_UNIX`) and
-// with `Option<PathBuf>` addresses in place of `SocketAddr` (an `AF_UNIX`
-// peer that never `bind`-ed has no address to report, unlike TCP).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use platform::net::{UnixListener as _, UnixStream as _};
-
+// minus `local_addr`/`peer_addr`, which bypass rustils entirely (see
+// `UnixSocketAddr`'s own docs for why) rather than using its
+// `Option<PathBuf>`-shaped equivalents -- unlike `tcp.rs`, this file
+// never actually calls a `platform::net::UnixListener`/`UnixStream`
+// trait method by name, only inherent methods on the concrete
+// `PlatformUnixListener`/`PlatformUnixStream` types below, so there's no
+// blanket `as _` trait import to bring into scope here.
 #[cfg(target_os = "linux")]
 use platform_linux::{
     LinuxUnixListener as PlatformUnixListener, LinuxUnixStream as PlatformUnixStream,
@@ -30,6 +32,97 @@ use platform_linux::{
 use platform_macos::{
     MacosUnixListener as PlatformUnixListener, MacosUnixStream as PlatformUnixStream,
 };
+
+/// An `AF_UNIX` address: a filesystem pathname, a Linux/Android
+/// abstract-namespace name (a kernel-assigned identifier with no
+/// filesystem presence at all, unrelated to `/proc`'s notion of
+/// "abstract" -- see [`as_abstract_name`](Self::as_abstract_name)), or
+/// unnamed (an unbound socket, or the client end of a `connect`-only
+/// pair that never itself called `bind`). A plain `Option<PathBuf>`
+/// (this crate's original shape for [`UnixListener::local_addr`]/
+/// [`UnixStream::local_addr`]/[`UnixStream::peer_addr`]) can't represent
+/// the abstract-namespace case at all -- an abstract name is an
+/// arbitrary byte string, not a real path -- so this wraps
+/// `std::os::unix::net::SocketAddr` instead, mirroring tokio's own
+/// `net::unix::UnixSocketAddr` exactly (itself the same wrapper).
+#[derive(Clone)]
+pub struct UnixSocketAddr(std::os::unix::net::SocketAddr);
+
+impl UnixSocketAddr {
+    /// An address for [`UnixListener::bind_addr`]/[`UnixStream::connect_addr`]
+    /// naming a real filesystem path -- see `std::os::unix::net::SocketAddr::from_pathname`.
+    pub fn from_pathname(path: impl AsRef<Path>) -> io::Result<UnixSocketAddr> {
+        std::os::unix::net::SocketAddr::from_pathname(path).map(UnixSocketAddr)
+    }
+
+    /// An address naming a Linux/Android abstract-namespace identifier
+    /// instead of a real filesystem path -- `name`'s raw bytes (which
+    /// may contain anything, including embedded NULs, unlike a
+    /// pathname) are matched exactly by a peer naming the same bytes;
+    /// nothing is created on the filesystem, and the name stops
+    /// existing once every socket bound to it closes. See
+    /// `std::os::unix::net::SocketAddr::from_abstract_name`. Linux/
+    /// Android-only: no other platform has this concept.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn from_abstract_name(name: impl AsRef<[u8]>) -> io::Result<UnixSocketAddr> {
+        use std::os::linux::net::SocketAddrExt;
+        std::os::unix::net::SocketAddr::from_abstract_name(name).map(UnixSocketAddr)
+    }
+
+    /// This address's filesystem path, if it's a pathname address --
+    /// `None` for an abstract-namespace or unnamed address.
+    pub fn as_pathname(&self) -> Option<&Path> {
+        self.0.as_pathname()
+    }
+
+    /// This address's raw abstract-namespace name, if it's one -- see
+    /// [`from_abstract_name`](Self::from_abstract_name). `None` for a
+    /// pathname or unnamed address. Linux/Android-only.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn as_abstract_name(&self) -> Option<&[u8]> {
+        use std::os::linux::net::SocketAddrExt;
+        self.0.as_abstract_name()
+    }
+
+    /// Whether this is the unnamed address -- an unbound socket, or a
+    /// stream socket's end that only ever `connect`-ed, never `bind`-ed
+    /// its own address.
+    pub fn is_unnamed(&self) -> bool {
+        self.0.is_unnamed()
+    }
+}
+
+impl std::fmt::Debug for UnixSocketAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+/// Borrows `fd` just long enough to ask `std`'s own `getsockname`/
+/// `getpeername` wrapper what address it's bound to/connected to --
+/// `std::os::unix::net::SocketAddr` already correctly distinguishes
+/// pathname/abstract-namespace/unnamed on read-back, so there's no need
+/// to hand-roll `sockaddr_un` parsing a second time here (only *packing*
+/// one, for `bind_addr`/`connect_addr`, needs that -- see
+/// `socket::unix_bind_addr`/`unix_connect_addr`). `mem::forget`ing the
+/// temporary afterward keeps this non-owning -- see
+/// `UdpSocket::with_std`'s identical reasoning (`std::os::unix::net::
+/// UnixStream` rather than `UnixListener`/`UnixDatagram` purely because
+/// it alone has both `local_addr` and `peer_addr`; the underlying
+/// `getsockname`/`getpeername` calls don't care which of the three a
+/// bare fd is treated as).
+fn with_borrowed_std_stream<R>(
+    fd: std::os::fd::RawFd,
+    f: impl FnOnce(&std::os::unix::net::UnixStream) -> R,
+) -> R {
+    // SAFETY: `fd` is a valid, currently-open fd owned by the caller for
+    // the duration of this call; `mem::forget` below stops this
+    // temporary from double-closing it.
+    let borrowed = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    let result = f(&borrowed);
+    std::mem::forget(borrowed);
+    result
+}
 
 /// A non-blocking, epoll-driven Unix domain socket listener.
 pub struct UnixListener {
@@ -58,6 +151,33 @@ impl UnixListener {
         Ok(UnixListener { inner, io, reactor })
     }
 
+    /// Binds and starts listening at `addr` -- the [`UnixSocketAddr`]-based
+    /// counterpart of [`bind`](Self::bind), the only way to bind at a
+    /// Linux/Android abstract-namespace address rather than a real
+    /// filesystem path (see [`UnixSocketAddr::from_abstract_name`]). Unlike
+    /// `bind`, doesn't reclaim a stale leftover socket file -- there's no
+    /// path-based rustils helper to reuse for that, and an
+    /// abstract-namespace address has no filesystem presence to leave a
+    /// stale file behind in the first place.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn bind_addr(addr: &UnixSocketAddr) -> io::Result<UnixListener> {
+        let fd = socket::new_unix_socket()?;
+        socket::unix_bind_addr(fd.as_raw_fd(), &addr.0)?;
+        // 1024 matches the fixed backlog tokio's own convenience `bind`
+        // uses internally, in the absence of a caller-supplied one here
+        // (the same reason `UnixListener::bind` above needs none either
+        // -- only `UnixSocket::listen`'s own explicit `backlog` parameter
+        // exposes this as a choice at all).
+        socket::listen(fd.as_raw_fd(), 1024)?;
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformUnixListener::from(fd);
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(UnixListener { inner, io, reactor })
+    }
+
     pub async fn accept(&self) -> io::Result<(UnixStream, Option<PathBuf>)> {
         std::future::poll_fn(|cx| self.poll_accept(cx)).await
     }
@@ -81,8 +201,8 @@ impl UnixListener {
         }))
     }
 
-    pub fn local_addr(&self) -> io::Result<Option<PathBuf>> {
-        self.inner.local_addr().map_err(from_platform_err)
+    pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
+        with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.local_addr()).map(UnixSocketAddr)
     }
 
     /// `SO_ERROR` -- see [`TcpStream::take_error`](super::TcpStream::take_error)
@@ -348,6 +468,26 @@ impl UnixStream {
         Ok(UnixStream { inner, io, reactor })
     }
 
+    /// Connects to `addr` -- the [`UnixSocketAddr`]-based counterpart of
+    /// [`connect`](Self::connect), the only way to connect to a Linux/
+    /// Android abstract-namespace address rather than a real filesystem
+    /// path.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let fd = socket::new_unix_socket()?;
+        socket::unix_connect_addr(fd.as_raw_fd(), &addr.0)?;
+        let io = reactor.register(fd.as_raw_fd())?;
+        let inner = PlatformUnixStream::from(fd);
+        ready_io(&io, ReactorInterest::Write, || {
+            socket::take_socket_error(inner.as_raw_fd())
+        })
+        .await?;
+        Ok(UnixStream { inner, io, reactor })
+    }
+
     fn from_accepted(inner: PlatformUnixStream, reactor: Arc<Reactor>) -> io::Result<UnixStream> {
         let io = reactor.register(inner.as_raw_fd())?;
         Ok(UnixStream { inner, io, reactor })
@@ -394,12 +534,12 @@ impl UnixStream {
         Ok(())
     }
 
-    pub fn peer_addr(&self) -> io::Result<Option<PathBuf>> {
-        self.inner.peer_addr().map_err(from_platform_err)
+    pub fn peer_addr(&self) -> io::Result<UnixSocketAddr> {
+        with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.peer_addr()).map(UnixSocketAddr)
     }
 
-    pub fn local_addr(&self) -> io::Result<Option<PathBuf>> {
-        self.inner.local_addr().map_err(from_platform_err)
+    pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
+        with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.local_addr()).map(UnixSocketAddr)
     }
 
     /// `SO_ERROR` -- see [`TcpStream::take_error`](super::TcpStream::take_error)
