@@ -60,7 +60,7 @@ use std::time::Duration;
 type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
 type LocalAbnormalHook = Box<dyn FnOnce(Outcome)>;
 
-pub(super) struct LocalTask {
+pub(crate) struct LocalTask {
     id: TaskId,
     state: State,
     future: RefCell<Option<LocalBoxFuture>>,
@@ -105,7 +105,15 @@ impl LocalTask {
     /// `RefCell::borrow_mut()`, and no `mark_finished()` call, since a
     /// `LocalSet` doesn't track an active-task count the way `Runtime`
     /// does (nothing here needs to wait for local tasks to drain).
-    fn run(self: Arc<Self>) {
+    ///
+    /// `pub(crate)` (not just called from this module's own `drive`)
+    /// so [`super::super::runtime::LocalRuntime::block_on`]'s own
+    /// combined drive loop -- interleaving this set's tasks with
+    /// `Handle::spawn`'d ones on the same thread -- can run a task it
+    /// pulled off this set's queue directly. Still only ever safe to
+    /// call on the single thread `bind_or_check_thread` bound this set
+    /// to, same as from `drive` itself.
+    pub(crate) fn run(self: Arc<Self>) {
         if !self.state.begin_poll() {
             self.future.borrow_mut().take();
             self.fire_abnormal_hook(Outcome::Aborted);
@@ -442,6 +450,18 @@ impl LocalSet {
     pub fn enter(&self) -> LocalEnterGuard {
         self.bind_or_check_thread();
         LocalEnterGuard(enter(self.shared.clone()))
+    }
+
+    /// Pulls the next locally-runnable task (if any) off this set's own
+    /// queue, without running it -- pairs with [`LocalTask::run`] so
+    /// [`crate::runtime::LocalRuntime::block_on`] can drain this set's
+    /// queue as one step of its own combined drive loop, interleaved
+    /// with the ordinary (`Handle::spawn`) queue a bare `LocalSet`
+    /// knows nothing about. Not exposed as part of driving the set on
+    /// its own -- [`run_until`](Self::run_until) remains the supported
+    /// way to do that.
+    pub(crate) fn next_local_task(&self) -> Option<Arc<LocalTask>> {
+        self.shared.next_task()
     }
 }
 
