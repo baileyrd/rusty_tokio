@@ -213,6 +213,17 @@ impl Command {
             stderr,
         })
     }
+
+    /// Spawns the child and waits for it to exit, discarding whatever
+    /// it writes to stdout/stderr (they stay inherited from this
+    /// process, exactly like `std::process::Command::status`). Sugar
+    /// for `self.spawn()?.wait().await`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn status(&mut self) -> io::Result<ExitStatus> {
+        self.spawn()?.wait().await
+    }
 }
 
 /// A spawned child process. `stdin`/`stdout`/`stderr` are `Some` exactly
