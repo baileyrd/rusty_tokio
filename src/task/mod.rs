@@ -20,6 +20,7 @@
 
 mod block_in_place;
 mod builder;
+pub mod coop;
 mod id;
 mod join;
 mod join_set;

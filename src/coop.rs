@@ -98,3 +98,24 @@ pub(crate) fn poll_proceed(cx: &mut Context<'_>) -> Poll<()> {
         }
     })
 }
+
+/// Whether the current task could still make at least one more
+/// budget-charging poll right now -- `true` both when there's budget
+/// left *and* when there's no accounting in effect at all (matching
+/// [`poll_proceed`]'s own no-tracking-outside-`Task::run` behavior).
+/// Backs the public [`crate::task::coop::has_budget_remaining`].
+pub(crate) fn has_budget_remaining() -> bool {
+    BUDGET.with(|b| !matches!(b.get(), Some(0)))
+}
+
+/// Runs `f` with budget tracking suspended for its duration (as if
+/// outside of any task's top-level poll), restoring whatever budget was
+/// in scope before once `f` returns -- backs the public
+/// [`crate::task::coop::unconstrained`]'s exemption from the ambient
+/// budget.
+pub(crate) fn with_unconstrained<R>(f: impl FnOnce() -> R) -> R {
+    let previous = BUDGET.with(|b| b.replace(None));
+    let result = f();
+    BUDGET.with(|b| b.set(previous));
+    result
+}
