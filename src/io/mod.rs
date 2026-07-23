@@ -71,13 +71,14 @@ pub use simplex::{simplex, SimplexStream};
 pub use split::{split, SplitReadHalf, SplitWriteHalf};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{
-    OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpSocket, TcpStream, WriteHalf,
+    OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, TcpListener, TcpSocket, TcpStream,
+    WriteHalf,
 };
 pub use udp::{UdpSocket, MAX_UDP_DATAGRAM_SIZE};
 #[cfg(unix)]
 pub use unix::{
     gid_t, pid_t, uid_t, OwnedUnixReadHalf, OwnedUnixWriteHalf, UCred, UnixListener, UnixReadHalf,
-    UnixStream, UnixWriteHalf,
+    UnixReuniteError, UnixStream, UnixWriteHalf,
 };
 #[cfg(unix)]
 pub use unix_datagram::UnixDatagram;

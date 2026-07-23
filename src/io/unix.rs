@@ -516,6 +516,14 @@ impl OwnedUnixReadHalf {
     pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
         self.0.try_read_vectored(bufs)
     }
+
+    /// Recombines this half with its `other` write half back into a
+    /// single [`UnixStream`], if they came from the same
+    /// [`UnixStream::into_split`] call -- see [`UnixReuniteError`] for
+    /// when they didn't.
+    pub fn reunite(self, other: OwnedUnixWriteHalf) -> Result<UnixStream, UnixReuniteError> {
+        reunite(self, other)
+    }
 }
 
 impl OwnedUnixWriteHalf {
@@ -526,7 +534,81 @@ impl OwnedUnixWriteHalf {
     pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         self.0.try_write_vectored(bufs)
     }
+
+    /// Recombines this half with its `other` read half back into a
+    /// single [`UnixStream`] -- see [`OwnedUnixReadHalf::reunite`].
+    pub fn reunite(self, other: OwnedUnixReadHalf) -> Result<UnixStream, UnixReuniteError> {
+        reunite(other, self)
+    }
 }
+
+impl AsRef<UnixStream> for OwnedUnixReadHalf {
+    fn as_ref(&self) -> &UnixStream {
+        &self.0
+    }
+}
+
+impl AsRef<UnixStream> for OwnedUnixWriteHalf {
+    fn as_ref(&self) -> &UnixStream {
+        &self.0
+    }
+}
+
+/// Recombines `read`/`write` into the single `UnixStream` they were
+/// [`split`](UnixStream::into_split) from, if the two `Arc`s underneath
+/// them are the same allocation -- `Err` otherwise, handing both halves
+/// straight back rather than dropping them.
+fn reunite(
+    read: OwnedUnixReadHalf,
+    write: OwnedUnixWriteHalf,
+) -> Result<UnixStream, UnixReuniteError> {
+    if Arc::ptr_eq(&read.0, &write.0) {
+        drop(write);
+        // `read` was the last of the two clones sharing this `Arc`, now
+        // that `write`'s has just been dropped -- this always succeeds.
+        Ok(Arc::try_unwrap(read.0).unwrap_or_else(|_| {
+            unreachable!(
+                "UnixStream: Arc::try_unwrap failed in reunite despite being the last clone"
+            )
+        }))
+    } else {
+        Err(UnixReuniteError(read, write))
+    }
+}
+
+/// The error [`OwnedUnixReadHalf::reunite`]/[`OwnedUnixWriteHalf::reunite`]
+/// return when the two halves passed in didn't come from the same
+/// [`UnixStream::into_split`] call -- hands both halves straight back
+/// rather than dropping them, so the caller isn't forced to discard
+/// otherwise-still-usable halves just because they didn't match.
+///
+/// Named `UnixReuniteError` (rather than colliding with
+/// [`super::ReuniteError`], the same shape for [`super::TcpStream`]'s
+/// owned halves) since this crate flattens every type straight to the
+/// crate root rather than nesting them under per-protocol modules the
+/// way tokio's own `tcp::ReuniteError`/`unix::ReuniteError` (identically
+/// named, but distinguished by their different module paths) do.
+pub struct UnixReuniteError(pub OwnedUnixReadHalf, pub OwnedUnixWriteHalf);
+
+// See `tcp::ReuniteError`'s identical comment: neither owned half nor
+// `UnixStream` itself implements `Debug`, so this is hand-written rather
+// than derived.
+impl std::fmt::Debug for UnixReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("UnixReuniteError").finish()
+    }
+}
+
+impl std::fmt::Display for UnixReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tried to reunite halves that are not from the same socket"
+        )
+    }
+}
+
+impl std::error::Error for UnixReuniteError {}
 
 impl AsyncRead for OwnedUnixReadHalf {
     fn poll_read(

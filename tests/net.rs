@@ -93,6 +93,101 @@ fn into_split_moves_owned_halves_into_separate_tasks() {
 }
 
 #[test]
+fn reunite_succeeds_for_halves_from_the_same_stream_and_it_still_works() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (read_half, write_half) = client.into_split();
+        let reunited = read_half.reunite(write_half).unwrap();
+
+        reunited.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        reunited.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn reunite_fails_for_halves_from_different_streams_and_hands_them_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // Two separate listeners (rather than one listener accepting
+        // both connections) so which accepted stream corresponds to
+        // which client connection is deterministic by construction, not
+        // by accept-ordering.
+        let listener_a = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener_b = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+
+        // `a`'s connection is deliberately never `accept()`-ed here --
+        // the three-way TCP handshake already completed once `connect`
+        // below returned, so it stays a live, open connection from the
+        // client's perspective for as long as `listener_a` itself stays
+        // alive (kept alive in this outer scope, not dropped until the
+        // whole test body finishes -- dropping the *listener* while a
+        // connection still sits unaccepted in its backlog resets that
+        // connection, which would defeat the point here).
+        let server = rusty_tokio::spawn(async move {
+            let (b, _peer) = listener_b.accept().await.unwrap();
+            let mut buf = [0u8; 2];
+            b.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hi");
+        });
+
+        let a = TcpStream::connect(addr_a).await.unwrap();
+        let b = TcpStream::connect(addr_b).await.unwrap();
+        let (read_a, _write_a) = a.into_split();
+        let (_read_b, write_b) = b.into_split();
+
+        let Err(err) = read_a.reunite(write_b) else {
+            panic!("expected reunite to fail for halves from different streams");
+        };
+        // The error hands both mismatched halves straight back rather
+        // than dropping them -- still independently usable, not just
+        // inert placeholders.
+        let (read_a, mut write_b) = (err.0, err.1);
+        write_b.write_all(b"hi").await.unwrap();
+        assert_eq!(
+            read_a.try_read(&mut [0u8; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "read_a should still be a live, functioning half with nothing sent to it"
+        );
+
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn owned_halves_as_ref_exposes_the_underlying_stream() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (read_half, write_half) = client.into_split();
+
+        let read_local = AsRef::<TcpStream>::as_ref(&read_half).local_addr().unwrap();
+        let write_local = AsRef::<TcpStream>::as_ref(&write_half)
+            .local_addr()
+            .unwrap();
+        assert_eq!(read_local, write_local);
+    });
+}
+
+#[test]
 fn split_borrows_read_and_write_halves_from_one_task() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
