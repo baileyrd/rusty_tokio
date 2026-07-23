@@ -89,6 +89,29 @@ impl RuntimeMetrics {
         self.shared.worker_park_count(worker)
     }
 
+    /// How many times `worker` has parked *and* unparked combined,
+    /// cumulative since the runtime started -- incremented once when it
+    /// parks and again once it unparks, so (unlike
+    /// [`worker_park_count`](Self::worker_park_count)) an odd value
+    /// means `worker` is currently parked, an even value means it's
+    /// currently active.
+    ///
+    /// # Panics
+    /// Panics if `worker >= self.num_workers()`.
+    pub fn worker_park_unpark_count(&self, worker: usize) -> u64 {
+        self.shared.worker_park_unpark_count(worker)
+    }
+
+    /// How long `worker` has spent finding and running tasks (i.e. not
+    /// parked), cumulative since the runtime started. Monotonically
+    /// increasing -- never decremented or reset.
+    ///
+    /// # Panics
+    /// Panics if `worker >= self.num_workers()`.
+    pub fn worker_total_busy_duration(&self, worker: usize) -> std::time::Duration {
+        self.shared.worker_total_busy_duration(worker)
+    }
+
     /// How many OS threads the `spawn_blocking` pool currently has
     /// alive. Grows lazily (one per queued job, up to
     /// [`super::Builder::max_blocking_threads`]) and shrinks back down

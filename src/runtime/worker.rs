@@ -7,6 +7,7 @@ use crate::task::Task;
 use crossbeam_deque::{Injector, Stealer, Worker as LocalWorker};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use std::time::Instant;
 
 thread_local! {
     static WORKER_INDEX: Cell<Option<usize>> = const { Cell::new(None) };
@@ -118,7 +119,11 @@ pub(super) fn spawn_worker(
 fn run(shared: &Arc<Shared>, idx: usize) {
     while !shared.is_shutdown() {
         match shared.next_task(idx) {
-            Some(task) => task.run(),
+            Some(task) => {
+                let start = Instant::now();
+                task.run();
+                shared.add_busy_duration(idx, start.elapsed());
+            }
             None => shared.park(idx),
         }
         if RETIRED.with(Cell::get) {
