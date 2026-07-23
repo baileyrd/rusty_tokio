@@ -294,6 +294,12 @@ impl Sleep {
         }
         self.deadline = deadline;
     }
+
+    /// Checks whether this `Sleep`'s deadline has already passed, without
+    /// polling it (and so without registering a waker if it hasn't).
+    pub fn is_elapsed(&self) -> bool {
+        self.timer.now() >= self.deadline
+    }
 }
 
 impl Future for Sleep {
