@@ -140,6 +140,38 @@ pub trait AsyncWrite {
     }
 }
 
+/// Generates a `read_$be_name`/`read_$le_name` pair of big-/little-endian
+/// integer or float methods for [`AsyncReadExt`], each reading
+/// `size_of::<$ty>()` bytes via `read_exact` and decoding them with
+/// `$ty`'s own `from_be_bytes`/`from_le_bytes` -- the exact same
+/// hand-rolled approach tokio's own byte-order methods use (no
+/// `byteorder` crate dependency needed on either side).
+macro_rules! read_int_method {
+    ($be_name:ident, $le_name:ident, $ty:ty) => {
+        fn $be_name(&mut self) -> impl Future<Output = io::Result<$ty>> + Send
+        where
+            Self: Unpin + Send,
+        {
+            async move {
+                let mut buf = [0u8; std::mem::size_of::<$ty>()];
+                self.read_exact(&mut buf).await?;
+                Ok(<$ty>::from_be_bytes(buf))
+            }
+        }
+
+        fn $le_name(&mut self) -> impl Future<Output = io::Result<$ty>> + Send
+        where
+            Self: Unpin + Send,
+        {
+            async move {
+                let mut buf = [0u8; std::mem::size_of::<$ty>()];
+                self.read_exact(&mut buf).await?;
+                Ok(<$ty>::from_le_bytes(buf))
+            }
+        }
+    };
+}
+
 /// Provided (non-overridable) conveniences over [`AsyncRead::poll_read`].
 /// Blanket-implemented for every `AsyncRead`, the same way tokio's
 /// `AsyncReadExt` is -- you never impl this yourself, just `poll_read`.
@@ -225,9 +257,62 @@ pub trait AsyncReadExt: AsyncRead {
             Ok(n)
         }
     }
+
+    fn read_u8(&mut self) -> impl Future<Output = io::Result<u8>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let mut buf = [0u8; 1];
+            self.read_exact(&mut buf).await?;
+            Ok(buf[0])
+        }
+    }
+
+    fn read_i8(&mut self) -> impl Future<Output = io::Result<i8>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            let mut buf = [0u8; 1];
+            self.read_exact(&mut buf).await?;
+            Ok(buf[0] as i8)
+        }
+    }
+
+    read_int_method!(read_u16, read_u16_le, u16);
+    read_int_method!(read_i16, read_i16_le, i16);
+    read_int_method!(read_u32, read_u32_le, u32);
+    read_int_method!(read_i32, read_i32_le, i32);
+    read_int_method!(read_u64, read_u64_le, u64);
+    read_int_method!(read_i64, read_i64_le, i64);
+    read_int_method!(read_u128, read_u128_le, u128);
+    read_int_method!(read_i128, read_i128_le, i128);
+    read_int_method!(read_f32, read_f32_le, f32);
+    read_int_method!(read_f64, read_f64_le, f64);
 }
 
 impl<T: AsyncRead + ?Sized> AsyncReadExt for T {}
+
+/// Write-side counterpart of [`read_int_method`] -- see that macro's
+/// docs.
+macro_rules! write_int_method {
+    ($be_name:ident, $le_name:ident, $ty:ty) => {
+        fn $be_name(&mut self, n: $ty) -> impl Future<Output = io::Result<()>> + Send
+        where
+            Self: Unpin + Send,
+        {
+            async move { self.write_all(&n.to_be_bytes()).await }
+        }
+
+        fn $le_name(&mut self, n: $ty) -> impl Future<Output = io::Result<()>> + Send
+        where
+            Self: Unpin + Send,
+        {
+            async move { self.write_all(&n.to_le_bytes()).await }
+        }
+    };
+}
 
 /// Provided conveniences over [`AsyncWrite`]'s `poll_*` methods.
 /// Blanket-implemented for every `AsyncWrite`. See [`AsyncReadExt`]'s
@@ -286,6 +371,31 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         async move { std::future::poll_fn(|cx| Pin::new(&mut *self).poll_shutdown(cx)).await }
     }
+
+    fn write_u8(&mut self, n: u8) -> impl Future<Output = io::Result<()>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move { self.write_all(&[n]).await }
+    }
+
+    fn write_i8(&mut self, n: i8) -> impl Future<Output = io::Result<()>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move { self.write_all(&[n as u8]).await }
+    }
+
+    write_int_method!(write_u16, write_u16_le, u16);
+    write_int_method!(write_i16, write_i16_le, i16);
+    write_int_method!(write_u32, write_u32_le, u32);
+    write_int_method!(write_i32, write_i32_le, i32);
+    write_int_method!(write_u64, write_u64_le, u64);
+    write_int_method!(write_i64, write_i64_le, i64);
+    write_int_method!(write_u128, write_u128_le, u128);
+    write_int_method!(write_i128, write_i128_le, i128);
+    write_int_method!(write_f32, write_f32_le, f32);
+    write_int_method!(write_f64, write_f64_le, f64);
 }
 
 impl<T: AsyncWrite + ?Sized> AsyncWriteExt for T {}
