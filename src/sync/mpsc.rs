@@ -147,6 +147,50 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Sends without waiting, failing immediately if the channel is
+    /// either full or closed -- the value is handed back in either
+    /// case via [`TrySendError`], not lost.
+    pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if !guard.receiver_alive {
+            drop(guard);
+            return Err(TrySendError::Closed(value));
+        }
+        if guard.queue.len() + guard.reserved < guard.capacity {
+            guard.queue.push_back(value);
+            let waker = guard.recv_waker.take();
+            drop(guard);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            Ok(())
+        } else {
+            drop(guard);
+            Err(TrySendError::Full(value))
+        }
+    }
+
+    /// Like [`send`](Self::send), but fails instead of waiting past
+    /// `timeout` for capacity -- built on [`reserve`](Self::reserve)
+    /// rather than timing out `send` directly, so `value` is never
+    /// moved anywhere until capacity is actually secured, and can
+    /// always be handed back via [`SendTimeoutError`] if it isn't in
+    /// time.
+    pub async fn send_timeout(
+        &self,
+        value: T,
+        timeout: std::time::Duration,
+    ) -> Result<(), SendTimeoutError<T>> {
+        match crate::time::timeout(timeout, self.reserve()).await {
+            Ok(Ok(permit)) => {
+                permit.send(value);
+                Ok(())
+            }
+            Ok(Err(_closed)) => Err(SendTimeoutError::Closed(value)),
+            Err(_elapsed) => Err(SendTimeoutError::Timeout(value)),
+        }
+    }
+
     /// Waits for capacity, then reserves one slot without filling it
     /// yet -- unlike [`send`](Self::send), the value to put there
     /// doesn't need to exist yet at the time the wait for room happens.
@@ -427,6 +471,51 @@ impl<T> fmt::Display for TrySendError<T> {
 }
 
 impl<T> std::error::Error for TrySendError<T> {}
+
+/// Why [`Sender::send_timeout`] failed to deliver `value` in time.
+pub enum SendTimeoutError<T> {
+    /// `timeout` elapsed before capacity freed up.
+    Timeout(T),
+    /// The receiver has already been dropped.
+    Closed(T),
+}
+
+impl<T> SendTimeoutError<T> {
+    /// The value that couldn't be sent.
+    pub fn into_inner(self) -> T {
+        match self {
+            SendTimeoutError::Timeout(t) | SendTimeoutError::Closed(t) => t,
+        }
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, SendTimeoutError::Timeout(_))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self, SendTimeoutError::Closed(_))
+    }
+}
+
+impl<T> fmt::Debug for SendTimeoutError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendTimeoutError::Timeout(_) => f.write_str("SendTimeoutError::Timeout(..)"),
+            SendTimeoutError::Closed(_) => f.write_str("SendTimeoutError::Closed(..)"),
+        }
+    }
+}
+
+impl<T> fmt::Display for SendTimeoutError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendTimeoutError::Timeout(_) => write!(f, "timed out waiting for channel capacity"),
+            SendTimeoutError::Closed(_) => write!(f, "channel closed"),
+        }
+    }
+}
+
+impl<T> std::error::Error for SendTimeoutError<T> {}
 
 impl<T> Receiver<T> {
     pub async fn recv(&mut self) -> Option<T> {
