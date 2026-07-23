@@ -204,6 +204,43 @@ fn unix_echo_roundtrip() {
 }
 
 #[test]
+fn pair_gives_two_ends_already_connected_to_each_other() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (a, b) = UnixStream::pair().unwrap();
+
+        let task = rusty_tokio::spawn(async move {
+            let mut buf = [0u8; 4];
+            b.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            b.write_all(b"pong").await.unwrap();
+        });
+
+        a.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        a.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+
+        task.await.unwrap();
+    });
+}
+
+#[test]
+fn pair_ends_report_the_unnamed_address_on_both_sides() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (a, b) = UnixStream::pair().unwrap();
+        // `socketpair(2)` sockets have no filesystem path -- neither
+        // end ever `bind`s one, unlike a `connect`/`accept` pair
+        // through a real `UnixListener`.
+        assert!(a.local_addr().unwrap().is_unnamed());
+        assert!(a.peer_addr().unwrap().is_unnamed());
+        assert!(b.local_addr().unwrap().is_unnamed());
+        assert!(b.peer_addr().unwrap().is_unnamed());
+    });
+}
+
+#[test]
 fn bind_addr_then_connect_addr_round_trip_over_a_pathname() {
     let rt = Runtime::new().unwrap();
     let path = temp_socket_path("bind-addr-pathname");
