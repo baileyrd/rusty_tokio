@@ -322,6 +322,17 @@ impl Drop for EnterGuard {
     }
 }
 
+/// Guard returned by [`LocalSet::enter`] -- see that method's docs for
+/// what it does. Dropping it (whether explicitly via `drop(guard)` or
+/// at the end of its scope) restores whichever `LocalSet` (if any) was
+/// ambient on this thread before `enter` was called.
+#[must_use = "dropping this immediately un-enters the LocalSet"]
+pub struct LocalEnterGuard(
+    // Never read -- held only for its `Drop` impl, which is what
+    // actually restores the previously-ambient `LocalSet` (if any).
+    #[allow(dead_code)] EnterGuard,
+);
+
 /// Spawn a `!Send` future onto whichever [`LocalSet`] is currently
 /// driving the calling thread via [`LocalSet::run_until`]. Prefer
 /// [`LocalSet::spawn_local`] when the `LocalSet` itself is at hand; this
@@ -413,6 +424,24 @@ impl LocalSet {
         self.bind_or_check_thread();
         let _guard = enter(self.shared.clone());
         drive(&self.shared, future)
+    }
+
+    /// Makes this `LocalSet` the ambient one on the calling thread --
+    /// so [`spawn_local`] (the free function) can be called -- for as
+    /// long as the returned [`LocalEnterGuard`] stays alive, *without*
+    /// also driving the set's queue the way [`run_until`](Self::run_until)
+    /// does. Nothing spawned onto it actually runs until a `run_until`
+    /// call on this same set (on this same thread) drives it, whether
+    /// that happens while this guard is still held or after it's
+    /// dropped.
+    ///
+    /// # Panics
+    /// Panics if called from a different thread than whichever one
+    /// first called `spawn_local`/`run_until`/`enter` on this set.
+    #[track_caller]
+    pub fn enter(&self) -> LocalEnterGuard {
+        self.bind_or_check_thread();
+        LocalEnterGuard(enter(self.shared.clone()))
     }
 }
 

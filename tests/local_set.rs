@@ -164,3 +164,75 @@ fn run_until_can_be_called_more_than_once_on_the_same_set() {
     let b = local.run_until(async { 2 });
     assert_eq!((a, b), (1, 2));
 }
+
+#[test]
+fn enter_makes_spawn_local_callable_without_driving_the_set() {
+    let local = LocalSet::new();
+    let guard = local.enter();
+    // Doesn't panic -- `enter` alone is enough to make `spawn_local`
+    // (the free function) find this set as the ambient one.
+    let handle = spawn_local(async { 1 + 1 });
+    drop(guard);
+
+    // Nothing runs it yet -- `enter` only makes the set ambient, it
+    // doesn't drive its queue the way `run_until` does.
+    assert!(!handle.is_finished());
+
+    let value = local.run_until(async move { handle.await.unwrap() });
+    assert_eq!(value, 2);
+}
+
+#[test]
+fn enter_guard_dropping_restores_the_previously_ambient_set() {
+    let outer = LocalSet::new();
+    let inner = LocalSet::new();
+
+    // Spawn onto `inner` while it's entered, then (after that guard
+    // drops) spawn again -- that second spawn should land back on
+    // `outer`, which is still ambient from the enclosing `run_until`.
+    let (inner_handle, outer_handle) = outer.run_until(async {
+        let inner_handle = {
+            let _inner_guard = inner.enter();
+            spawn_local(async { "inner" })
+        };
+        let outer_handle = spawn_local(async { "outer" });
+        (inner_handle, outer_handle)
+    });
+
+    // Driving `outer` alone resolves the outer-targeted handle...
+    let outer_value = outer.run_until(async move { outer_handle.await.unwrap() });
+    assert_eq!(outer_value, "outer");
+
+    // ...while the inner-targeted one only resolves once `inner`
+    // itself is separately driven -- proving it never landed on
+    // `outer`'s queue in the first place.
+    let inner_value = inner.run_until(async move { inner_handle.await.unwrap() });
+    assert_eq!(inner_value, "inner");
+}
+
+#[test]
+fn enter_from_a_second_thread_panics() {
+    let local = Arc::new(std::sync::Mutex::new(LocalSet::new()));
+    local.lock().unwrap().run_until(async {});
+
+    // The panic happens on this spawned thread, not the test's own --
+    // `#[should_panic]` only catches the latter, so assert on the
+    // propagated payload directly, same as
+    // `using_a_local_set_from_a_second_thread_panics` above.
+    let local2 = local.clone();
+    let result = std::thread::spawn(move || {
+        let _guard = local2.lock().unwrap().enter();
+    })
+    .join();
+
+    let payload = result.expect_err("expected the second thread to panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload was not a string");
+    assert!(
+        message.contains("single thread that first used it"),
+        "unexpected panic message: {message}"
+    );
+}
