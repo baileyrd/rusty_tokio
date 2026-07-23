@@ -954,6 +954,75 @@ fn try_reserve_owned_hands_the_sender_back_on_failure() {
 }
 
 #[test]
+fn try_send_succeeds_while_there_is_room_then_reports_full() {
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.try_send(1).unwrap();
+    match tx.try_send(2) {
+        Err(rusty_tokio::sync::mpsc::TrySendError::Full(2)) => {}
+        other => panic!("expected TrySendError::Full(2), got {other:?}"),
+    }
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        assert_eq!(rx.recv().await, Some(1));
+    });
+}
+
+#[test]
+fn try_send_reports_closed_once_the_receiver_drops() {
+    let (tx, rx) = mpsc::channel::<i32>(4);
+    drop(rx);
+    match tx.try_send(9) {
+        Err(rusty_tokio::sync::mpsc::TrySendError::Closed(9)) => {}
+        other => panic!("expected TrySendError::Closed(9), got {other:?}"),
+    }
+}
+
+#[test]
+fn send_timeout_succeeds_once_capacity_frees_up_in_time() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1).await.unwrap();
+
+        let sender = rusty_tokio::spawn(async move {
+            tx.send_timeout(2, Duration::from_secs(5)).await.unwrap();
+        });
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        sender.await.unwrap();
+    });
+}
+
+#[test]
+fn send_timeout_times_out_and_hands_the_value_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, _rx) = mpsc::channel::<i32>(1);
+        tx.send(1).await.unwrap(); // fill the one slot; nobody ever reads it
+
+        match tx.send_timeout(2, Duration::from_millis(20)).await {
+            Err(rusty_tokio::sync::mpsc::SendTimeoutError::Timeout(2)) => {}
+            other => panic!("expected SendTimeoutError::Timeout(2), got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn send_timeout_reports_closed_once_the_receiver_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, rx) = mpsc::channel::<i32>(4);
+        drop(rx);
+        match tx.send_timeout(9, Duration::from_secs(5)).await {
+            Err(rusty_tokio::sync::mpsc::SendTimeoutError::Closed(9)) => {}
+            other => panic!("expected SendTimeoutError::Closed(9), got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn unbounded_send_never_blocks_even_far_past_any_bounded_capacity() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
