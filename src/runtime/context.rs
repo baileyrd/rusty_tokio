@@ -35,6 +35,35 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    /// Like [`try_current`](Self::try_current), but reports *why* there
+    /// isn't a usable ambient runtime instead of collapsing every
+    /// failure into one bare `None` -- see [`TryCurrentError`]. Doesn't
+    /// change `try_current`'s own signature (a real, if rare, breaking
+    /// change for existing callers); this is purely additive.
+    pub fn try_current_detailed() -> Result<Handle, TryCurrentError> {
+        match CURRENT.try_with(|c| c.borrow().clone()) {
+            Ok(Some(handle)) => {
+                if handle.shared.is_shutting_down() {
+                    Err(TryCurrentError {
+                        kind: TryCurrentErrorKind::RuntimeShutDown,
+                    })
+                } else {
+                    Ok(handle)
+                }
+            }
+            Ok(None) => Err(TryCurrentError {
+                kind: TryCurrentErrorKind::MissingContext,
+            }),
+            // Only reachable calling this from within another value's
+            // `Drop` impl that itself runs during this thread's own
+            // shutdown, after thread-locals have started being torn
+            // down -- `LocalKey::with` would otherwise just panic here.
+            Err(_access_error) => Err(TryCurrentError {
+                kind: TryCurrentErrorKind::ThreadLocalDestroyed,
+            }),
+        }
+    }
+
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> crate::task::JoinHandle<F::Output>
     where
@@ -198,3 +227,80 @@ impl Drop for EnterGuard {
         CURRENT.with(|c| *c.borrow_mut() = self.previous.take());
     }
 }
+
+/// Why [`Handle::try_current_detailed`] failed to find a *usable*
+/// ambient runtime -- distinguishes the cases
+/// [`Handle::try_current`]'s bare `Option` collapses into one `None`:
+/// never inside a runtime at all
+/// ([`is_missing_context`](Self::is_missing_context)), this thread's
+/// own thread-local storage for the ambient runtime already torn down
+/// ([`is_thread_local_destroyed`](Self::is_thread_local_destroyed)), or
+/// an ambient runtime that does exist but is itself already shutting
+/// down ([`is_rt_shutdown_err`](Self::is_rt_shutdown_err)).
+pub struct TryCurrentError {
+    kind: TryCurrentErrorKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TryCurrentErrorKind {
+    MissingContext,
+    ThreadLocalDestroyed,
+    RuntimeShutDown,
+}
+
+impl TryCurrentError {
+    /// No ambient runtime at all -- the same case
+    /// [`Handle::try_current`] reports as a bare `None`.
+    pub fn is_missing_context(&self) -> bool {
+        self.kind == TryCurrentErrorKind::MissingContext
+    }
+
+    /// This thread's own thread-local storage for the ambient runtime
+    /// has already been torn down. Only reachable calling
+    /// [`Handle::try_current_detailed`] from within another value's
+    /// `Drop` impl that itself runs during this thread's own shutdown,
+    /// after thread-locals start being destroyed.
+    pub fn is_thread_local_destroyed(&self) -> bool {
+        self.kind == TryCurrentErrorKind::ThreadLocalDestroyed
+    }
+
+    /// An ambient runtime does exist, but it's already begun shutting
+    /// down (`Runtime::drop`/`shutdown_background`/`shutdown_timeout`)
+    /// -- distinct from
+    /// [`is_missing_context`](Self::is_missing_context): there's a real
+    /// `Handle` to have, it's just not safe to keep relying on for new
+    /// work.
+    pub fn is_rt_shutdown_err(&self) -> bool {
+        self.kind == TryCurrentErrorKind::RuntimeShutDown
+    }
+}
+
+impl std::fmt::Debug for TryCurrentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TryCurrentError")
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for TryCurrentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            TryCurrentErrorKind::MissingContext => {
+                write!(f, "there is no rusty_tokio runtime running on this thread")
+            }
+            TryCurrentErrorKind::ThreadLocalDestroyed => write!(
+                f,
+                "the thread-local storage tracking the ambient rusty_tokio \
+                 runtime has already been destroyed"
+            ),
+            TryCurrentErrorKind::RuntimeShutDown => write!(
+                f,
+                "the rusty_tokio runtime running on this thread has already \
+                 begun shutting down"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TryCurrentError {}

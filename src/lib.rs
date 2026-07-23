@@ -322,6 +322,7 @@ mod runtime;
 
 pub use runtime::{
     Builder, EnterGuard, Handle, LocalOptions, LocalRuntime, Runtime, RuntimeMetrics,
+    TryCurrentError,
 };
 pub use rusty_tokio_macros::{main, test};
 pub use std::pin::pin;

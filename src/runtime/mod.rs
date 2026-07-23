@@ -22,7 +22,7 @@ mod current_thread;
 mod metrics;
 mod worker;
 
-pub use context::{EnterGuard, Handle};
+pub use context::{EnterGuard, Handle, TryCurrentError};
 pub use metrics::RuntimeMetrics;
 
 use crate::io::reactor::Reactor;
