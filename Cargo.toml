@@ -40,6 +40,13 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b702096
 # one narrowly-scoped sub-crate for a piece this project already decided
 # isn't its point to hand-roll unverified).
 crossbeam-deque = "0.8"
+# `Buf`/`BufMut` integration for `AsyncReadExt::read_buf`/
+# `AsyncWriteExt::{write_buf,write_all_buf}` (issue #120) -- the small,
+# stable, widely-depended-on crate that defines those traits in the
+# first place; there's no reasonable way to accept a caller's own
+# `bytes::BytesMut`/etc. without depending on the crate that defines
+# the trait it implements.
+bytes = "1"
 # Optional (see the `futures-io-compat` feature below): a small, stable,
 # widely-depended-on crate that exists specifically to let unrelated
 # async I/O implementations interoperate -- issue #7's second option,
