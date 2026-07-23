@@ -252,6 +252,15 @@ impl UnixStream {
         socket::take_error(self.inner.as_raw_fd())
     }
 
+    /// The effective credentials (user ID, group ID, and -- where the
+    /// platform reports one -- process ID) of whichever process called
+    /// `connect` or `pair` to create the *other* end of this socket.
+    /// See [`UCred`]'s own docs for how each platform actually obtains
+    /// these.
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        ucred::get_peer_cred(self.inner.as_raw_fd())
+    }
+
     /// Waits for this stream to become readable -- see
     /// [`super::TcpStream::readable`], identical reasoning here.
     pub async fn readable(&self) -> io::Result<()> {
@@ -540,5 +549,148 @@ impl AsyncWrite for OwnedUnixWriteHalf {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut &*self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// A type representing a Unix user ID -- deliberately a plain `u32`
+/// rather than `libc::uid_t` itself (which the exact underlying integer
+/// type of varies by platform), matching tokio's own `net::unix::uid_t`.
+#[allow(non_camel_case_types)]
+pub type uid_t = u32;
+
+/// A type representing a Unix group ID -- see [`uid_t`] for why this
+/// isn't `libc::gid_t` directly.
+#[allow(non_camel_case_types)]
+pub type gid_t = u32;
+
+/// A type representing a Unix process (or process group) ID -- see
+/// [`uid_t`] for why this isn't `libc::pid_t` directly.
+#[allow(non_camel_case_types)]
+pub type pid_t = i32;
+
+/// The effective credentials of the process on the other end of a
+/// [`UnixStream`] -- see [`UnixStream::peer_cred`]. Obtained via
+/// `SO_PEERCRED` on Linux, or `LOCAL_PEEREPID` (for the pid) plus
+/// `getpeereid(2)` (for the uid/gid) on macOS -- the two platforms this
+/// crate builds on report a peer's credentials through genuinely
+/// different mechanisms, unlike most other socket options here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UCred {
+    uid: uid_t,
+    gid: gid_t,
+    pid: Option<pid_t>,
+}
+
+impl UCred {
+    /// The peer's effective user ID.
+    pub fn uid(&self) -> uid_t {
+        self.uid
+    }
+
+    /// The peer's effective group ID.
+    pub fn gid(&self) -> gid_t {
+        self.gid
+    }
+
+    /// The peer's process ID -- always `Some` on both platforms this
+    /// crate supports (Linux's `SO_PEERCRED` and macOS's
+    /// `LOCAL_PEEREPID` both report one), unlike some other Unix
+    /// platforms tokio itself runs on but this crate doesn't build for.
+    pub fn pid(&self) -> Option<pid_t> {
+        self.pid
+    }
+}
+
+mod ucred {
+    use super::UCred;
+    use std::io;
+    use std::os::fd::RawFd;
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn get_peer_cred(fd: RawFd) -> io::Result<UCred> {
+        use std::mem;
+
+        // SAFETY: `ucred` is a plain C struct of three integers -- valid
+        // for any bit pattern, so a zeroed value is already well-formed
+        // to hand `getsockopt` a pointer into.
+        let mut cred: libc::ucred = unsafe { mem::zeroed() };
+        let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+        // SAFETY: `fd` is a valid, currently-open socket (borrowed from
+        // `self.inner`, still owned by the caller for the duration of
+        // this call); `cred`/`len` are correctly-sized, initialized
+        // out-parameters matching what `SO_PEERCRED` expects.
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if ret == 0 && len as usize == mem::size_of::<libc::ucred>() {
+            Ok(UCred {
+                uid: cred.uid,
+                gid: cred.gid,
+                pid: Some(cred.pid),
+            })
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn get_peer_cred(fd: RawFd) -> io::Result<UCred> {
+        use std::mem::MaybeUninit;
+
+        // `LOCAL_PEEREPID` (Darwin-specific, unlike Linux's single
+        // `SO_PEERCRED` covering all three fields at once) reports only
+        // the peer's pid; the uid/gid still come from the separate
+        // `getpeereid(2)` call below, matching tokio's own macOS
+        // implementation.
+        let mut pid: MaybeUninit<libc::pid_t> = MaybeUninit::uninit();
+        let mut pid_len: libc::socklen_t = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: `fd` is a valid, currently-open socket; `pid`/`pid_len`
+        // are correctly-sized, initialized out-parameters.
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEEREPID,
+                pid.as_mut_ptr().cast(),
+                &mut pid_len,
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pid_len as usize != std::mem::size_of::<libc::pid_t>() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected pid size from LOCAL_PEEREPID",
+            ));
+        }
+        // SAFETY: just confirmed above that `getsockopt` filled in
+        // exactly `size_of::<pid_t>()` bytes.
+        let pid = unsafe { pid.assume_init() };
+
+        let mut uid = MaybeUninit::uninit();
+        let mut gid = MaybeUninit::uninit();
+        // SAFETY: `fd` is a valid, currently-open socket; `uid`/`gid`
+        // are valid out-parameters for `getpeereid` to initialize.
+        let ret = unsafe { libc::getpeereid(fd, uid.as_mut_ptr(), gid.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `getpeereid` returned success above, so both
+        // out-parameters are now initialized.
+        let (uid, gid) = unsafe { (uid.assume_init(), gid.assume_init()) };
+
+        Ok(UCred {
+            uid,
+            gid,
+            pid: Some(pid),
+        })
     }
 }

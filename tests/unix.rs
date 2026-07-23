@@ -122,6 +122,42 @@ fn unix_take_error_is_none_on_healthy_sockets() {
 }
 
 #[test]
+fn unix_peer_cred_reports_this_same_process_on_both_ends() {
+    // Both ends of this connection are the current process (it both
+    // `connect`s and `accept`s), so the peer credentials reported on
+    // either end are exactly this process's own -- verifiable directly
+    // against `libc::getuid`/`getgid`/`getpid` rather than needing a
+    // separate real peer process.
+    let expected_uid = unsafe { libc::getuid() };
+    let expected_gid = unsafe { libc::getgid() };
+    let expected_pid = std::process::id() as i32;
+
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("peer_cred");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        let client_cred = client.peer_cred().unwrap();
+        assert_eq!(client_cred.uid(), expected_uid);
+        assert_eq!(client_cred.gid(), expected_gid);
+        assert_eq!(client_cred.pid(), Some(expected_pid));
+
+        let stream = server.await.unwrap();
+        let server_cred = stream.peer_cred().unwrap();
+        assert_eq!(server_cred.uid(), expected_uid);
+        assert_eq!(server_cred.gid(), expected_gid);
+        assert_eq!(server_cred.pid(), Some(expected_pid));
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn many_concurrent_unix_connections() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     let path = temp_socket_path("many");
