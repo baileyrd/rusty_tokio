@@ -148,6 +148,63 @@ fn advance_drives_an_interval_through_several_ticks_deterministically() {
 }
 
 #[test]
+fn sleep_reset_re_arms_to_a_new_deadline_without_firing_the_old_one() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut sleeper = time::sleep(Duration::from_secs(5));
+        // Derived from the sleeper's own (paused-clock) deadline rather
+        // than a fresh `std::time::Instant::now()` read, which would
+        // drift from the virtual clock -- see `advance_*` tests above
+        // for the same reasoning.
+        let new_deadline = sleeper.deadline() + Duration::from_secs(15);
+
+        // Advance past the *original* deadline without polling `sleeper`
+        // in between, then reset it further out before it's ever
+        // actually awaited -- the old deadline must not have "stuck".
+        time::advance(Duration::from_secs(3)).await;
+        sleeper.reset(new_deadline);
+        assert_eq!(sleeper.deadline(), new_deadline);
+
+        time::advance(Duration::from_secs(17)).await;
+        sleeper.await;
+        // If reset hadn't taken effect, this would have already resolved
+        // back when time passed the original 5s deadline, well before
+        // this point -- reaching here at all is most of the assertion.
+    });
+}
+
+#[test]
+fn sleep_reset_after_a_poll_cancels_the_stale_registration_and_rearms() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut sleeper = time::sleep(Duration::from_secs(5));
+        let original_deadline = sleeper.deadline();
+
+        // Poll once directly (registers with the timer driver, since 5s
+        // hasn't elapsed yet) without going through a real `.await`.
+        std::future::poll_fn(|cx| {
+            let _ = Pin::new(&mut sleeper).poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        // Reset to fire 4s earlier than the original schedule --
+        // derived from `original_deadline` (the crate's own paused
+        // clock), not a fresh `Instant::now()` read.
+        let new_deadline = original_deadline - Duration::from_secs(4);
+        sleeper.reset(new_deadline);
+
+        time::advance(Duration::from_secs(1)).await;
+        sleeper.await;
+    });
+}
+
+#[test]
 fn interval_period_reports_the_configured_period() {
     let rt = Builder::new_current_thread().build().unwrap();
     rt.block_on(async {

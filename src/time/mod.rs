@@ -281,6 +281,19 @@ impl Sleep {
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
+
+    /// Re-arms this `Sleep` to resolve at a new `deadline`, in place --
+    /// useful in a loop that keeps re-scheduling the same `Sleep`
+    /// (a hand-rolled retry/backoff, say), avoiding a fresh allocation
+    /// each time the way dropping and calling [`sleep_until`] again
+    /// would. Cancels the current timer-driver registration, if any;
+    /// the next poll re-registers at the new deadline.
+    pub fn reset(&mut self, deadline: Instant) {
+        if let Some(id) = self.id.take() {
+            self.timer.cancel(id);
+        }
+        self.deadline = deadline;
+    }
 }
 
 impl Future for Sleep {
