@@ -1314,6 +1314,70 @@ fn notify_waiters_does_not_bank_anything_for_a_later_waiter() {
 }
 
 #[test]
+fn notify_last_wakes_the_most_recently_registered_waiter() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let notify = Arc::new(Notify::new());
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let mut waiters = Vec::new();
+        for id in 0..3 {
+            let notify = notify.clone();
+            let order = order.clone();
+            waiters.push(rusty_tokio::spawn(async move {
+                notify.notified().await;
+                order.lock().await.push(id);
+            }));
+            // Ensure each waiter actually registers before the next one
+            // spawns, so registration order is deterministic.
+            rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        notify.notify_last();
+        rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            *order.lock().await,
+            vec![2],
+            "notify_last should wake the most recently registered waiter (id 2), not the oldest"
+        );
+
+        // Clean up the still-parked waiters.
+        notify.notify_one();
+        notify.notify_one();
+        for w in waiters {
+            rusty_tokio::time::timeout(Duration::from_millis(200), w)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    });
+}
+
+#[test]
+fn notify_last_banks_a_permit_when_nobody_is_waiting() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Notify::new();
+        notify.notify_last(); // nobody waiting yet -- banks a permit
+        rusty_tokio::time::timeout(Duration::from_millis(100), notify.notified())
+            .await
+            .expect("banked permit from notify_last should let this resolve immediately");
+    });
+}
+
+#[test]
+fn const_new_builds_a_usable_notify_in_a_const_context() {
+    static NOTIFY: Notify = Notify::const_new();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        NOTIFY.notify_one();
+        rusty_tokio::time::timeout(Duration::from_millis(100), NOTIFY.notified())
+            .await
+            .expect("const_new()-built Notify should behave identically to new()");
+    });
+}
+
+#[test]
 fn once_cell_get_or_init_runs_the_initializer_exactly_once() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     rt.block_on(async {

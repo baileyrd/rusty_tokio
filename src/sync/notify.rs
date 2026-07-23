@@ -70,11 +70,39 @@ impl Notify {
         }
     }
 
+    /// Identical to [`new`](Self::new), but usable in a `const` context
+    /// (e.g. a `static NOTIFY: Notify = Notify::const_new();`) -- there's
+    /// no lazy-initialization trick here to work around, `Mutex::new` and
+    /// `VecDeque::new` are already both `const fn` themselves, so this is
+    /// just [`new`](Self::new) spelled as one.
+    pub const fn const_new() -> Self {
+        Notify {
+            inner: Mutex::new(Inner {
+                permits: 0,
+                waiters: VecDeque::new(),
+            }),
+        }
+    }
+
     /// Wakes one waiter, or -- if nobody is currently waiting -- banks a
     /// permit so the very next `notified().await` returns immediately.
     pub fn notify_one(&self) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(state) = guard.waiters.pop_front() {
+            drop(guard);
+            Self::fire(&state);
+        } else {
+            guard.permits += 1;
+        }
+    }
+
+    /// Like [`notify_one`](Self::notify_one), but wakes the most
+    /// recently registered waiter (LIFO) instead of the oldest (FIFO).
+    /// Still just banks a permit, exactly like `notify_one`, if nobody
+    /// is currently waiting.
+    pub fn notify_last(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(state) = guard.waiters.pop_back() {
             drop(guard);
             Self::fire(&state);
         } else {
