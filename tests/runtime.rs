@@ -220,3 +220,78 @@ fn nested_spawns_and_many_wakeups_all_complete() {
         assert_eq!(handle.await.unwrap(), (0..1000u64).sum::<u64>());
     });
 }
+
+#[test]
+fn thread_name_applies_to_worker_threads() {
+    let rt = Runtime::builder()
+        .worker_threads(2)
+        .thread_name("my-custom-worker")
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let name = rusty_tokio::spawn(async { std::thread::current().name().unwrap().to_string() })
+            .await
+            .unwrap();
+        assert_eq!(name, "my-custom-worker");
+    });
+}
+
+#[test]
+fn thread_name_fn_is_called_once_per_spawned_thread() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let rt = {
+        let counter = counter.clone();
+        Runtime::builder()
+            .worker_threads(3)
+            .thread_name_fn(move || format!("counted-{}", counter.fetch_add(1, Ordering::SeqCst)))
+            .build()
+            .unwrap()
+    };
+    // Each worker's name is generated synchronously, on the calling
+    // thread, while `build()` spawns it -- before any task has run, so
+    // this is already deterministic without needing to observe which
+    // worker a given task happens to land on (nothing here forces even
+    // distribution of quick tasks across workers, only that stealing
+    // *can* happen when a worker is actually idle).
+    assert_eq!(counter.load(Ordering::SeqCst), 3);
+
+    rt.block_on(async {
+        let name = rusty_tokio::spawn(async { std::thread::current().name().unwrap().to_string() })
+            .await
+            .unwrap();
+        assert!(
+            name.starts_with("counted-"),
+            "expected a name from thread_name_fn, got {name:?}"
+        );
+    });
+}
+
+#[test]
+fn thread_stack_size_can_be_configured_without_erroring() {
+    let rt = Runtime::builder()
+        .worker_threads(1)
+        .thread_stack_size(4 * 1024 * 1024)
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let result = rusty_tokio::spawn(async { 1 + 1 }).await.unwrap();
+        assert_eq!(result, 2);
+    });
+}
+
+#[test]
+fn thread_keep_alive_shrinks_the_blocking_pool_after_the_configured_idle_time() {
+    let rt = Runtime::builder()
+        .thread_keep_alive(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let metrics = rt.metrics();
+    rt.block_on(async move {
+        rusty_tokio::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(metrics.num_blocking_threads(), 1);
+
+        // Comfortably past the configured 50ms idle timeout.
+        rusty_tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(metrics.num_blocking_threads(), 0);
+    });
+}

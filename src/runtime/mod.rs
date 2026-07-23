@@ -51,6 +51,48 @@ fn steal_loop<T>(mut f: impl FnMut() -> Steal<T>) -> Option<T> {
     }
 }
 
+/// How to name each thread this runtime spawns (worker threads,
+/// blocking-pool threads) -- see [`Builder::thread_name`]/
+/// [`Builder::thread_name_fn`].
+#[derive(Clone)]
+enum ThreadNameSource {
+    /// `rusty_tokio-worker-{idx}` / `rusty_tokio-blocking`, this crate's
+    /// own defaults.
+    Default,
+    Fixed(String),
+    Fn(Arc<dyn Fn() -> String + Send + Sync>),
+}
+
+impl ThreadNameSource {
+    fn resolve(&self, default: impl FnOnce() -> String) -> String {
+        match self {
+            ThreadNameSource::Default => default(),
+            ThreadNameSource::Fixed(name) => name.clone(),
+            ThreadNameSource::Fn(f) => f(),
+        }
+    }
+}
+
+/// Threaded through to every `std::thread::Builder::spawn` call this
+/// runtime makes (worker threads, blocking-pool threads) -- see
+/// [`Builder::thread_name`]/[`Builder::thread_name_fn`]/
+/// [`Builder::thread_stack_size`].
+#[derive(Clone)]
+pub(crate) struct ThreadConfig {
+    name: ThreadNameSource,
+    stack_size: Option<usize>,
+}
+
+impl ThreadConfig {
+    fn thread_builder(&self, default_name: impl FnOnce() -> String) -> std::thread::Builder {
+        let mut builder = std::thread::Builder::new().name(self.name.resolve(default_name));
+        if let Some(size) = self.stack_size {
+            builder = builder.stack_size(size);
+        }
+        builder
+    }
+}
+
 /// The multi-threaded flavor's per-worker local queues and cross-worker
 /// stealing (`crossbeam_deque::Worker`/`Stealer` -- see issue #8), versus
 /// the current-thread flavor's single queue, touched by whichever thread
@@ -122,6 +164,10 @@ pub(crate) struct Shared {
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
     pub(crate) blocking_pool: BlockingPool,
+    /// See [`Builder::thread_name`]/[`Builder::thread_name_fn`]/
+    /// [`Builder::thread_stack_size`] -- read by [`worker::spawn_worker`]
+    /// for each worker thread's own name/stack size.
+    pub(crate) thread_config: ThreadConfig,
     /// Whether this runtime was built via
     /// [`Builder::new_current_thread`] -- checked by `time::pause`,
     /// which (matching tokio) only makes sense on that flavor: pausing
@@ -332,6 +378,8 @@ pub struct Builder {
     flavor: Flavor,
     worker_threads: usize,
     max_blocking_threads: usize,
+    thread_config: ThreadConfig,
+    thread_keep_alive: Duration,
 }
 
 impl Builder {
@@ -342,6 +390,11 @@ impl Builder {
                 .map(|n| n.get())
                 .unwrap_or(1),
             max_blocking_threads: 32,
+            thread_config: ThreadConfig {
+                name: ThreadNameSource::Default,
+                stack_size: None,
+            },
+            thread_keep_alive: Duration::from_secs(10),
         }
     }
 
@@ -365,6 +418,11 @@ impl Builder {
             flavor: Flavor::CurrentThread,
             worker_threads: 1,
             max_blocking_threads: 32,
+            thread_config: ThreadConfig {
+                name: ThreadNameSource::Default,
+                stack_size: None,
+            },
+            thread_keep_alive: Duration::from_secs(10),
         }
     }
 
@@ -395,12 +453,52 @@ impl Builder {
         self
     }
 
+    /// Sets a fixed name for every thread this runtime spawns (worker
+    /// threads and blocking-pool threads alike) -- see
+    /// [`thread_name_fn`](Self::thread_name_fn) for a per-thread name
+    /// instead. Defaults to `rusty_tokio-worker-{idx}`/
+    /// `rusty_tokio-blocking`.
+    pub fn thread_name(mut self, name: impl Into<String>) -> Self {
+        self.thread_config.name = ThreadNameSource::Fixed(name.into());
+        self
+    }
+
+    /// Like [`thread_name`](Self::thread_name), but calls `f` once per
+    /// spawned thread to generate its name, rather than reusing one
+    /// fixed string for every one of them.
+    pub fn thread_name_fn(mut self, f: impl Fn() -> String + Send + Sync + 'static) -> Self {
+        self.thread_config.name = ThreadNameSource::Fn(Arc::new(f));
+        self
+    }
+
+    /// Sets the stack size for every thread this runtime spawns. Left
+    /// at `std::thread::Builder`'s own (platform-dependent) default if
+    /// never called.
+    pub fn thread_stack_size(mut self, size: usize) -> Self {
+        self.thread_config.stack_size = Some(size);
+        self
+    }
+
+    /// How long a blocking-pool thread sits idle (no queued
+    /// [`crate::spawn_blocking`] work) before it exits. Worker threads
+    /// (the async scheduler pool) aren't affected -- they live for the
+    /// runtime's entire life regardless of this setting. Defaults to 10
+    /// seconds.
+    pub fn thread_keep_alive(mut self, duration: Duration) -> Self {
+        self.thread_keep_alive = duration;
+        self
+    }
+
     pub fn build(self) -> std::io::Result<Runtime> {
         let reactor = Arc::new(Reactor::new()?);
         reactor.start();
         let timer = Arc::new(TimerDriver::new());
         timer.start();
-        let blocking_pool = BlockingPool::new(self.max_blocking_threads);
+        let blocking_pool = BlockingPool::new(
+            self.max_blocking_threads,
+            self.thread_config.clone(),
+            self.thread_keep_alive,
+        );
 
         let is_current_thread = self.flavor == Flavor::CurrentThread;
         // A current-thread runtime has exactly one local queue -- the
@@ -473,6 +571,7 @@ impl Builder {
             reactor,
             timer,
             blocking_pool,
+            thread_config: self.thread_config,
             is_current_thread,
         });
 

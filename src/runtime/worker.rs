@@ -103,8 +103,9 @@ pub(super) fn spawn_worker(
     idx: usize,
     local: LocalWorker<Arc<Task>>,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
-        .name(format!("rusty_tokio-worker-{idx}"))
+    shared
+        .thread_config
+        .thread_builder(|| format!("rusty_tokio-worker-{idx}"))
         .spawn(move || {
             WORKER_INDEX.with(|c| c.set(Some(idx)));
             LOCAL_QUEUE.with(|q| *q.borrow_mut() = Some(local));
