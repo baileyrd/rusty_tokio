@@ -800,6 +800,66 @@ where
     }
 }
 
+/// Like [`copy`], but for a `reader` that's already an [`AsyncBufRead`]
+/// -- writes straight out of the reader's own internal buffer instead
+/// of copying through a second, private one first. A hand-rolled
+/// `poll_fn`-driven state machine (rather than plain sequential
+/// `.await`s the way [`copy`] itself is written) specifically because a
+/// slice borrowed from [`AsyncBufRead::poll_fill_buf`] can't be held
+/// across a separate `.await` point safely without extra unsafe code --
+/// staying inside one synchronous `poll` call per step sidesteps that
+/// entirely, the same reason [`copy_bidirectional`]'s own `CopyBuffer`
+/// is written this way instead of as a plain `async fn` loop.
+pub async fn copy_buf<R, W>(reader: &mut R, writer: &mut W) -> io::Result<u64>
+where
+    R: AsyncBufRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    let mut pos = 0usize;
+    let mut read_done = false;
+    let mut amt = 0u64;
+    std::future::poll_fn(|cx| loop {
+        if !read_done {
+            let available = match Pin::new(&mut *reader).poll_fill_buf(cx) {
+                Poll::Ready(Ok(buf)) => buf,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            if available.is_empty() {
+                read_done = true;
+            } else {
+                match Pin::new(&mut *writer).poll_write(cx, &available[pos..]) {
+                    Poll::Ready(Ok(0)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "write zero byte into writer",
+                        )));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        pos += n;
+                        amt += n as u64;
+                        if pos == available.len() {
+                            Pin::new(&mut *reader).consume(pos);
+                            pos = 0;
+                        }
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+                continue;
+            }
+        }
+        if read_done {
+            return match Pin::new(&mut *writer).poll_flush(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(amt)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            };
+        }
+    })
+    .await
+}
+
 /// One direction of a [`copy_bidirectional`] relay: reads from `reader`
 /// into an internal buffer and writes it out to `writer`, tracking EOF
 /// and the running byte count across however many separate polls that
@@ -816,13 +876,13 @@ struct CopyBuffer {
 }
 
 impl CopyBuffer {
-    fn new() -> Self {
+    fn with_capacity(capacity: usize) -> Self {
         CopyBuffer {
             read_done: false,
             pos: 0,
             cap: 0,
             amt: 0,
-            buf: vec![0u8; 8192].into_boxed_slice(),
+            buf: vec![0u8; capacity].into_boxed_slice(),
         }
     }
 
@@ -952,8 +1012,27 @@ where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    let mut a_to_b = TransferState::Running(CopyBuffer::new());
-    let mut b_to_a = TransferState::Running(CopyBuffer::new());
+    copy_bidirectional_with_sizes(a, b, 8192, 8192).await
+}
+
+/// Like [`copy_bidirectional`], but with an independently chosen buffer
+/// size for each direction -- useful when one direction is known to
+/// carry meaningfully more traffic than the other (e.g. a bulk download
+/// versus its small acknowledgement stream), where one shared 8192-byte
+/// default is either wasteful or too small depending on which direction
+/// it's sized for.
+pub async fn copy_bidirectional_with_sizes<A, B>(
+    a: &mut A,
+    b: &mut B,
+    a_to_b_buf_size: usize,
+    b_to_a_buf_size: usize,
+) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let mut a_to_b = TransferState::Running(CopyBuffer::with_capacity(a_to_b_buf_size));
+    let mut b_to_a = TransferState::Running(CopyBuffer::with_capacity(b_to_a_buf_size));
     std::future::poll_fn(|cx| {
         let a_to_b_result = a_to_b.poll(cx, Pin::new(&mut *a), Pin::new(&mut *b));
         let b_to_a_result = b_to_a.poll(cx, Pin::new(&mut *b), Pin::new(&mut *a));

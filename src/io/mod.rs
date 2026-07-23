@@ -56,8 +56,9 @@ mod util;
 #[cfg(unix)]
 pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
 pub use async_io::{
-    copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
-    AsyncSeekExt, AsyncWrite, AsyncWriteExt, Chain, ReadBuf, Take,
+    copy, copy_bidirectional, copy_bidirectional_with_sizes, copy_buf, AsyncBufRead,
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
+    Chain, ReadBuf, Take,
 };
 pub use buffered::{BufReader, BufStream, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]

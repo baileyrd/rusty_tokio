@@ -1,6 +1,6 @@
 use rusty_tokio::io::{
-    copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, TcpListener,
-    TcpStream,
+    copy_bidirectional, copy_bidirectional_with_sizes, AsyncRead, AsyncReadExt, AsyncWrite,
+    AsyncWriteExt, ReadBuf, TcpListener, TcpStream,
 };
 use rusty_tokio::Runtime;
 use std::io;
@@ -49,6 +49,56 @@ fn copy_bidirectional_relays_both_directions_with_independent_half_close() {
 
         assert_eq!(server.await.unwrap(), b"ping");
         assert_eq!(client.await.unwrap(), b"pong");
+    });
+}
+
+#[test]
+fn copy_bidirectional_with_sizes_relays_correctly_with_tiny_asymmetric_buffers() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let client_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_addr = client_listener.local_addr().unwrap();
+        let server_listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+
+        let client = rusty_tokio::spawn(async move {
+            let mut stream = TcpStream::connect(client_addr).await.unwrap();
+            // Bigger than the 1-byte a_to_b buffer below, so relaying it
+            // correctly requires looping over several small reads/writes
+            // rather than moving it in one shot.
+            stream
+                .write_all(b"a longer message than one byte")
+                .await
+                .unwrap();
+            AsyncWriteExt::shutdown(&mut stream).await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let server = rusty_tokio::spawn(async move {
+            let (mut stream, _peer) = server_listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            stream.write_all(b"ok").await.unwrap();
+            AsyncWriteExt::shutdown(&mut stream).await.unwrap();
+            received
+        });
+
+        let (mut relay_a, _peer) = client_listener.accept().await.unwrap();
+        let mut relay_b = TcpStream::connect(server_addr).await.unwrap();
+
+        // Deliberately tiny, and different in each direction, to
+        // exercise the "with_sizes" part specifically (not just that
+        // some default size relays correctly).
+        let (a_to_b, b_to_a) = copy_bidirectional_with_sizes(&mut relay_a, &mut relay_b, 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(a_to_b, 30);
+        assert_eq!(b_to_a, 2);
+
+        assert_eq!(server.await.unwrap(), b"a longer message than one byte");
+        assert_eq!(client.await.unwrap(), b"ok");
     });
 }
 
