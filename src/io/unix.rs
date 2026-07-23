@@ -141,6 +141,162 @@ impl std::os::fd::IntoRawFd for UnixListener {
     }
 }
 
+/// A bare Unix domain socket, before it's been decided whether to
+/// `bind` + [`listen`](Self::listen) (becoming a [`UnixListener`]),
+/// [`connect`](Self::connect) (becoming a [`UnixStream`]), or --
+/// only for one created via [`new_datagram`](Self::new_datagram) --
+/// [`datagram`](Self::datagram) (becoming a [`super::UnixDatagram`]).
+/// Mirrors tokio's own `net::UnixSocket`, the `AF_UNIX` counterpart of
+/// [`super::TcpSocket`], which already has this "bare socket before
+/// commit" shape.
+///
+/// Unlike `TcpSocket`, a single underlying `socket(2)` call can't be
+/// re-purposed between stream and datagram after the fact -- `listen`/
+/// `connect`/`datagram` each check `SO_TYPE` up front and reject the
+/// wrong kind with an error, rather than tracking which constructor was
+/// used as a separate field (which wouldn't survive a socket adopted
+/// via [`FromRawFd`](std::os::fd::FromRawFd) anyway).
+pub struct UnixSocket {
+    fd: std::os::fd::OwnedFd,
+}
+
+impl UnixSocket {
+    /// A bare, non-blocking `SOCK_STREAM` socket -- see
+    /// [`listen`](Self::listen)/[`connect`](Self::connect).
+    pub fn new_stream() -> io::Result<UnixSocket> {
+        Ok(UnixSocket {
+            fd: socket::new_unix_socket()?,
+        })
+    }
+
+    /// A bare, non-blocking `SOCK_DGRAM` socket -- see
+    /// [`datagram`](Self::datagram).
+    pub fn new_datagram() -> io::Result<UnixSocket> {
+        Ok(UnixSocket {
+            fd: socket::new_unix_datagram_socket()?,
+        })
+    }
+
+    /// Binds to `path`. Doesn't start listening (nor otherwise become
+    /// usable) yet -- see [`listen`](Self::listen)/
+    /// [`connect`](Self::connect)/[`datagram`](Self::datagram), matching
+    /// `bind(2)`/`listen(2)` already being separate syscalls at the OS
+    /// level (the same reason [`super::TcpSocket::bind`] is its own
+    /// step too).
+    pub fn bind(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        socket::unix_bind(self.fd.as_raw_fd(), path.as_ref())
+    }
+
+    /// Starts listening, turning this into an ordinary [`UnixListener`].
+    /// `backlog` is the OS's pending-connection queue length hint (see
+    /// `listen(2)`).
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    ///
+    /// # Errors
+    /// Fails if this socket was created via
+    /// [`new_datagram`](Self::new_datagram) instead of
+    /// [`new_stream`](Self::new_stream).
+    pub fn listen(self, backlog: u32) -> io::Result<UnixListener> {
+        if self.socket_type()? == libc::SOCK_DGRAM {
+            return Err(io::Error::other(
+                "listen cannot be called on a datagram socket",
+            ));
+        }
+        socket::listen(self.fd.as_raw_fd(), backlog)?;
+        let reactor = Handle::current().shared.reactor.clone();
+        let inner = PlatformUnixListener::from(self.fd);
+        // Already non-blocking from `socket::new_unix_socket` -- kept
+        // for the same belt-and-suspenders reason `TcpSocket::listen`
+        // sets it again too.
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        let io = reactor.register(inner.as_raw_fd())?;
+        Ok(UnixListener { inner, io, reactor })
+    }
+
+    /// Connects, turning this into an ordinary [`UnixStream`].
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    ///
+    /// # Errors
+    /// Fails if this socket was created via
+    /// [`new_datagram`](Self::new_datagram) instead of
+    /// [`new_stream`](Self::new_stream).
+    pub async fn connect(self, path: impl AsRef<Path>) -> io::Result<UnixStream> {
+        if self.socket_type()? == libc::SOCK_DGRAM {
+            return Err(io::Error::other(
+                "connect cannot be called on a datagram socket",
+            ));
+        }
+        let reactor = Handle::current().shared.reactor.clone();
+        socket::unix_connect(self.fd.as_raw_fd(), path.as_ref())?;
+        let io = reactor.register(self.fd.as_raw_fd())?;
+        let inner = PlatformUnixStream::from(self.fd);
+        // Same non-blocking-connect-completes-asynchronously reasoning
+        // as `UnixStream::connect`.
+        ready_io(&io, ReactorInterest::Write, || {
+            socket::take_socket_error(inner.as_raw_fd())
+        })
+        .await?;
+        Ok(UnixStream { inner, io, reactor })
+    }
+
+    /// Converts into an ordinary [`super::UnixDatagram`].
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    ///
+    /// # Errors
+    /// Fails if this socket was created via
+    /// [`new_stream`](Self::new_stream) instead of
+    /// [`new_datagram`](Self::new_datagram).
+    pub fn datagram(self) -> io::Result<super::UnixDatagram> {
+        if self.socket_type()? == libc::SOCK_STREAM {
+            return Err(io::Error::other(
+                "datagram cannot be called on a stream socket",
+            ));
+        }
+        super::UnixDatagram::from_owned_fd(self.fd)
+    }
+
+    fn socket_type(&self) -> io::Result<libc::c_int> {
+        socket::unix_socket_type(self.fd.as_raw_fd())
+    }
+}
+
+// Built directly on `std::os::fd::OwnedFd`'s own `AsFd`/`AsRawFd`/
+// `FromRawFd`/`IntoRawFd` -- a bare `UnixSocket` is never registered
+// with the reactor (`listen`/`connect`/`datagram` each do that only
+// once they've committed to a concrete type), so there's nothing to
+// deregister on drop either, unlike `UnixListener`/`UnixStream`.
+impl std::os::fd::AsFd for UnixSocket {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl std::os::fd::AsRawFd for UnixSocket {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl std::os::fd::FromRawFd for UnixSocket {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        UnixSocket {
+            fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+        }
+    }
+}
+
+impl std::os::fd::IntoRawFd for UnixSocket {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+
 /// A non-blocking, epoll-driven Unix domain stream socket.
 ///
 /// Like [`super::TcpStream`], exposes both a plain `&self`

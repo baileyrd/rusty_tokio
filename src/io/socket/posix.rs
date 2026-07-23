@@ -254,6 +254,90 @@ pub(crate) fn new_unix_socket() -> io::Result<OwnedFd> {
     }
 }
 
+/// The `AF_UNIX` counterpart of [`new_unix_socket`], but `SOCK_DGRAM`
+/// instead of `SOCK_STREAM` -- backs [`super::super::UnixSocket`
+/// ](super::super::UnixSocket)`::new_datagram`.
+pub(crate) fn new_unix_datagram_socket() -> io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain integer arguments, no memory referenced.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        cvt(fd)?;
+        // SAFETY: `fd` was just returned by `socket(2)` and is valid,
+        // otherwise-unowned, and wrapped exactly once.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // See `new_unix_socket`'s macOS arm for why this is two steps
+        // instead of one atomic `socket(2)` call.
+        //
+        // SAFETY: plain integer arguments, no memory referenced.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
+        cvt(fd)?;
+        // SAFETY: `fd` was just returned by `socket(2)` and is valid,
+        // otherwise-unowned, and wrapped exactly once.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
+        use std::os::fd::AsRawFd;
+        // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
+        // sole variadic argument `F_SETFD` expects.
+        if unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(owned)
+    }
+}
+
+/// `SO_TYPE` -- distinguishes a `SOCK_STREAM` from a `SOCK_DGRAM`
+/// `AF_UNIX` socket without tracking it separately as its own field,
+/// the same way tokio's own `UnixSocket` queries it (via `socket2`)
+/// rather than remembering which constructor made it -- so a socket
+/// adopted via `FromRawFd` (which has no constructor call to remember)
+/// still reports the right kind. Backs [`super::super::UnixSocket`
+/// ](super::super::UnixSocket)`::listen`/`connect`/`datagram`, each of
+/// which rejects the wrong kind up front rather than letting the
+/// underlying syscall fail (or, worse, silently misbehave) on it.
+pub(crate) fn unix_socket_type(fd: RawFd) -> io::Result<c_int> {
+    let mut ty: c_int = 0;
+    let mut len = mem::size_of::<c_int>() as socklen_t;
+    cvt(unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut ty as *mut c_int).cast(),
+            &mut len,
+        )
+    })?;
+    Ok(ty)
+}
+
+/// `bind(2)` on a bare, not-yet-bound `AF_UNIX` socket -- the `AF_UNIX`
+/// counterpart of [`bind`], same reasoning: backs [`super::super::
+/// UnixSocket`](super::super::UnixSocket)`::bind`, which needs bind and
+/// listen as two separate steps.
+pub(crate) fn unix_bind(fd: RawFd, path: &Path) -> io::Result<()> {
+    let (addr, len) = to_sockaddr_un(path)?;
+    // SAFETY: `addr` holds a valid `sockaddr_un` for exactly `len` bytes
+    // (`to_sockaddr_un`'s contract); `fd` is caller-owned and not yet
+    // bound.
+    cvt(unsafe {
+        libc::bind(
+            fd,
+            (&addr as *const libc::sockaddr_un).cast::<sockaddr>(),
+            len,
+        )
+    })?;
+    Ok(())
+}
+
 /// The byte offset of `sockaddr_un::sun_path` within `sockaddr_un` --
 /// `sun_path` is a trailing array whose start isn't at a portable
 /// constant offset (Linux's `sockaddr_un` has no leading `sun_len` byte,
