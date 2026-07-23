@@ -381,6 +381,42 @@ fn udp_broadcast_set_and_read_back() {
     });
 }
 
+#[test]
+fn udp_ttl_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        socket.set_ttl(48).unwrap();
+        assert_eq!(socket.ttl().unwrap(), 48);
+    });
+}
+
+#[test]
+fn udp_tos_v4_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        socket.set_tos_v4(0x10).unwrap();
+        assert_eq!(socket.tos_v4().unwrap(), 0x10);
+    });
+}
+
+#[test]
+fn udp_tclass_v6_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // Some sandboxed/CI environments have no IPv6 stack at all --
+        // skip rather than fail on an environment limitation this test
+        // isn't meant to exercise.
+        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+            eprintln!("skipping: no IPv6 support in this environment");
+            return;
+        };
+        socket.set_tclass_v6(0x20).unwrap();
+        assert_eq!(socket.tclass_v6().unwrap(), 0x20);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn udp_multicast_v4_round_trip_over_loopback() {

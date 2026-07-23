@@ -430,6 +430,41 @@ impl UdpSocket {
         self.with_std(|s| s.broadcast())
     }
 
+    /// `IP_TTL`/`IPV6_UNICAST_HOPS` -- the time-to-live outgoing
+    /// (unicast) packets are sent with. See `std::net::UdpSocket::set_ttl`.
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.with_std(|s| s.set_ttl(ttl))
+    }
+
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.with_std(|s| s.ttl())
+    }
+
+    /// `IP_TOS` -- the IPv4 type-of-service byte (DSCP/ECN bits)
+    /// outgoing packets are sent with. Hand-rolled (unlike
+    /// [`ttl`](Self::ttl)/[`set_ttl`](Self::set_ttl)): `std::net::
+    /// UdpSocket` has no `tos`/`set_tos` of its own, so this reuses the
+    /// same `socket::set_tos_v4`/`tos_v4` [`TcpSocket`](super::TcpSocket)
+    /// already exposes -- a plain `IPPROTO_IP`-level option, not
+    /// TCP-specific despite living in the same module.
+    pub fn set_tos_v4(&self, tos: u32) -> io::Result<()> {
+        socket::set_tos_v4(self.inner.as_raw_io(), tos)
+    }
+
+    pub fn tos_v4(&self) -> io::Result<u32> {
+        socket::tos_v4(self.inner.as_raw_io())
+    }
+
+    /// The IPv6 equivalent of [`set_tos_v4`](Self::set_tos_v4)
+    /// (`IPV6_TCLASS`) -- same hand-rolled reasoning.
+    pub fn set_tclass_v6(&self, tclass: u32) -> io::Result<()> {
+        socket::set_tclass_v6(self.inner.as_raw_io(), tclass)
+    }
+
+    pub fn tclass_v6(&self) -> io::Result<u32> {
+        socket::tclass_v6(self.inner.as_raw_io())
+    }
+
     /// Adopts an already-bound `std` socket -- e.g. one received from a
     /// supervisor process, or configured with `socket2` for an option
     /// this crate doesn't expose a wrapper for. Flips it non-blocking
