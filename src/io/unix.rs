@@ -488,6 +488,21 @@ impl UnixStream {
         Ok(UnixStream { inner, io, reactor })
     }
 
+    /// A pair of `UnixStream`s already connected to each other
+    /// (`socketpair(2)`) -- for handing one end to a child process or a
+    /// spawned task while keeping the other, with no filesystem path
+    /// (nor a listener to `bind`/`accept` through) involved at all.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let (fd_a, fd_b) = socket::unix_socketpair()?;
+        let a = UnixStream::from_accepted(PlatformUnixStream::from(fd_a), reactor.clone())?;
+        let b = UnixStream::from_accepted(PlatformUnixStream::from(fd_b), reactor)?;
+        Ok((a, b))
+    }
+
     fn from_accepted(inner: PlatformUnixStream, reactor: Arc<Reactor>) -> io::Result<UnixStream> {
         let io = reactor.register(inner.as_raw_fd())?;
         Ok(UnixStream { inner, io, reactor })

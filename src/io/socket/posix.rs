@@ -254,6 +254,51 @@ pub(crate) fn new_unix_socket() -> io::Result<OwnedFd> {
     }
 }
 
+/// A pair of non-blocking `AF_UNIX` stream sockets already connected to
+/// each other (`socketpair(2)`), with no filesystem path (or listener)
+/// involved at all -- backs [`super::super::UnixStream::pair`
+/// ](super::super::UnixStream::pair).
+pub(crate) fn unix_socketpair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as c_int; 2];
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `fds` is a valid, appropriately-sized out-parameter.
+        cvt(unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+                fds.as_mut_ptr(),
+            )
+        })?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // See `new_unix_socket`'s macOS arm for why this is two steps
+        // (`socketpair(2)` itself, then flipping each end non-blocking
+        // and `CLOEXEC` separately) instead of one atomic call.
+        //
+        // SAFETY: `fds` is a valid, appropriately-sized out-parameter.
+        cvt(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) })?;
+    }
+    // SAFETY: both fds were just returned by `socketpair(2)` above and
+    // are valid, otherwise-unowned, and each wrapped exactly once.
+    let (a, b) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        for fd in [&a, &b] {
+            platform_macos::sys::net::set_nonblocking(fd, true).map_err(from_platform_err)?;
+            // SAFETY: `fd` is caller-owned and open; `FD_CLOEXEC` is the
+            // sole variadic argument `F_SETFD` expects.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok((a, b))
+}
+
 /// The `AF_UNIX` counterpart of [`new_unix_socket`], but `SOCK_DGRAM`
 /// instead of `SOCK_STREAM` -- backs [`super::super::UnixSocket`
 /// ](super::super::UnixSocket)`::new_datagram`.
