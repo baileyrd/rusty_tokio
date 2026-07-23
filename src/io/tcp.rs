@@ -11,6 +11,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 // `PlatformTcpListener`/`PlatformTcpStream` are the only OS-specific
 // names in this file: rustils' concrete types cover bind/accept/
@@ -367,6 +368,13 @@ impl TcpStream {
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
         self.inner.set_nodelay(nodelay).map_err(from_platform_err)
+    }
+
+    /// The reverse of [`set_nodelay`](Self::set_nodelay) -- hand-rolled
+    /// (unlike the setter above), since rustils' own
+    /// `TcpStream`/`TcpListener` traits only expose the setter.
+    pub fn nodelay(&self) -> io::Result<bool> {
+        socket::nodelay(self.inner.as_raw_io())
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
@@ -806,6 +814,113 @@ impl TcpSocket {
 
     pub fn recv_buffer_size(&self) -> io::Result<u32> {
         socket::recv_buffer_size(self.fd.as_raw_io())
+    }
+
+    /// `SO_KEEPALIVE` -- enables periodic keepalive probes on an
+    /// otherwise-idle connection, so a dead peer (crashed, network
+    /// partition) is eventually detected instead of the connection
+    /// looking alive forever with nothing to notice otherwise.
+    pub fn set_keepalive(&self, keepalive: bool) -> io::Result<()> {
+        socket::set_keepalive(self.fd.as_raw_io(), keepalive)
+    }
+
+    pub fn keepalive(&self) -> io::Result<bool> {
+        socket::keepalive(self.fd.as_raw_io())
+    }
+
+    /// `SO_LINGER` -- controls what `close(2)`/drop does with any data
+    /// still queued to send: `None` (the default) closes immediately,
+    /// discarding it if it hasn't gone out yet; `Some(d)` blocks the
+    /// closing call for up to `d` trying to flush it first. See
+    /// [`set_zero_linger`](Self::set_zero_linger) for the other
+    /// commonly-wanted extreme (abort immediately, `RST` instead of a
+    /// clean `FIN`).
+    pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
+        socket::set_linger(self.fd.as_raw_io(), linger)
+    }
+
+    /// The reverse of [`set_linger`](Self::set_linger).
+    pub fn linger(&self) -> io::Result<Option<Duration>> {
+        socket::linger(self.fd.as_raw_io())
+    }
+
+    /// Sugar for `set_linger(Some(Duration::ZERO))` -- closing then
+    /// aborts the connection outright (an `RST`) rather than attempting
+    /// a clean `FIN` shutdown, discarding any unsent *and* unacknowledged
+    /// data immediately. Useful for a server that wants a misbehaving or
+    /// already-abandoned connection gone right away, without waiting on
+    /// a graceful close it has no reason to expect will complete cleanly.
+    pub fn set_zero_linger(&self) -> io::Result<()> {
+        socket::set_linger(self.fd.as_raw_io(), Some(Duration::ZERO))
+    }
+
+    /// `TCP_QUICKACK` -- Linux/Android only, no BSD/macOS equivalent.
+    /// See `socket::posix::set_quickack`'s own docs for why this is a
+    /// one-shot setting some kernels reset on the next segment, not a
+    /// persistent socket-lifetime option the way the others here are.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn set_quickack(&self, quickack: bool) -> io::Result<()> {
+        socket::set_quickack(self.fd.as_raw_io(), quickack)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn quickack(&self) -> io::Result<bool> {
+        socket::quickack(self.fd.as_raw_io())
+    }
+
+    /// `TCP_NODELAY` -- disables Nagle's algorithm, sending each write
+    /// immediately instead of batching small writes together.
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        socket::set_nodelay(self.fd.as_raw_io(), nodelay)
+    }
+
+    pub fn nodelay(&self) -> io::Result<bool> {
+        socket::nodelay(self.fd.as_raw_io())
+    }
+
+    /// `IP_TTL` -- the IPv4 time-to-live outgoing packets are sent with.
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        socket::set_ttl(self.fd.as_raw_io(), ttl)
+    }
+
+    pub fn ttl(&self) -> io::Result<u32> {
+        socket::ttl(self.fd.as_raw_io())
+    }
+
+    /// `IP_TOS` -- the IPv4 type-of-service byte (DSCP/ECN bits)
+    /// outgoing packets are sent with.
+    pub fn set_tos_v4(&self, tos: u32) -> io::Result<()> {
+        socket::set_tos_v4(self.fd.as_raw_io(), tos)
+    }
+
+    pub fn tos_v4(&self) -> io::Result<u32> {
+        socket::tos_v4(self.fd.as_raw_io())
+    }
+
+    /// The IPv6 equivalent of [`set_tos_v4`](Self::set_tos_v4)
+    /// (`IPV6_TCLASS`).
+    pub fn set_tclass_v6(&self, tclass: u32) -> io::Result<()> {
+        socket::set_tclass_v6(self.fd.as_raw_io(), tclass)
+    }
+
+    pub fn tclass_v6(&self) -> io::Result<u32> {
+        socket::tclass_v6(self.fd.as_raw_io())
+    }
+
+    /// Adopts an already-connected `std` stream as a bare [`TcpSocket`]
+    /// -- e.g. one received from a supervisor process, or configured
+    /// with `socket2` for an option this crate doesn't expose a wrapper
+    /// for. Unlike [`TcpStream::from_std`], this doesn't register
+    /// anything with the reactor or flip the socket non-blocking: a
+    /// `TcpSocket` is deliberately the pre-connect/pre-listen state, so
+    /// those steps stay deferred to whichever of [`connect`](Self::connect)/
+    /// [`listen`](Self::listen) the caller uses next, matching how
+    /// [`new_v4`](Self::new_v4)/[`new_v6`](Self::new_v6) themselves
+    /// don't touch the reactor either.
+    pub fn from_std_stream(stream: std::net::TcpStream) -> io::Result<TcpSocket> {
+        Ok(TcpSocket {
+            fd: OwnedIo::from(stream),
+        })
     }
 
     /// `SO_BINDTODEVICE` -- binds this socket to a specific network

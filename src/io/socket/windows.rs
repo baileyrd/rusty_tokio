@@ -41,6 +41,7 @@ use std::os::windows::io::{
     AsRawSocket, AsSocket, BorrowedSocket, FromRawSocket, OwnedSocket, RawSocket,
 };
 use std::sync::Once;
+use std::time::Duration;
 
 use windows_sys::Win32::Networking::WinSock::{
     self, IN_ADDR_0_0, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_STORAGE, SOCKET, WSADATA,
@@ -622,6 +623,109 @@ pub(crate) fn set_nodelay(sock: RawSocket, nodelay: bool) -> io::Result<()> {
         WinSock::TCP_NODELAY,
         nodelay as i32,
     )
+}
+
+pub(crate) fn nodelay(sock: RawSocket) -> io::Result<bool> {
+    Ok(getsockopt_int(sock, WinSock::IPPROTO_TCP, WinSock::TCP_NODELAY)? != 0)
+}
+
+pub(crate) fn set_keepalive(sock: RawSocket, keepalive: bool) -> io::Result<()> {
+    setsockopt_int(
+        sock,
+        WinSock::SOL_SOCKET,
+        WinSock::SO_KEEPALIVE,
+        keepalive as i32,
+    )
+}
+
+pub(crate) fn keepalive(sock: RawSocket) -> io::Result<bool> {
+    Ok(getsockopt_int(sock, WinSock::SOL_SOCKET, WinSock::SO_KEEPALIVE)? != 0)
+}
+
+/// `SO_LINGER` -- like the POSIX side, the option value is a struct
+/// (`WinSock::LINGER { l_onoff, l_linger }`, both `u16` here rather than
+/// POSIX's `c_int`), not a plain int, so this bypasses
+/// `setsockopt_int`/`getsockopt_int`. `d`'s whole-second count is
+/// truncated (not rounded) and capped at `u16::MAX` seconds -- Winsock's
+/// own field width, narrower than POSIX's `c_int`.
+pub(crate) fn set_linger(sock: RawSocket, linger: Option<Duration>) -> io::Result<()> {
+    let value = WinSock::LINGER {
+        l_onoff: linger.is_some() as u16,
+        l_linger: linger.map_or(0, |d| d.as_secs().min(u16::MAX as u64) as u16),
+    };
+    // SAFETY: `&value` is a valid `WinSock::LINGER` the kernel only
+    // reads for the call's duration; `sock` is caller-owned.
+    let r = unsafe {
+        WinSock::setsockopt(
+            sock as SOCKET,
+            WinSock::SOL_SOCKET,
+            WinSock::SO_LINGER,
+            (&value as *const WinSock::LINGER).cast(),
+            mem::size_of::<WinSock::LINGER>() as i32,
+        )
+    };
+    if r == WinSock::SOCKET_ERROR {
+        Err(wsa_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// The reverse of [`set_linger`] -- `None` if lingering is currently
+/// disabled.
+pub(crate) fn linger(sock: RawSocket) -> io::Result<Option<Duration>> {
+    let mut value = WinSock::LINGER {
+        l_onoff: 0,
+        l_linger: 0,
+    };
+    let mut len = mem::size_of::<WinSock::LINGER>() as i32;
+    // SAFETY: `&mut value`/`&mut len` are valid, exclusively borrowed
+    // out-params the kernel fills; `sock` is caller-owned.
+    let r = unsafe {
+        WinSock::getsockopt(
+            sock as SOCKET,
+            WinSock::SOL_SOCKET,
+            WinSock::SO_LINGER,
+            (&mut value as *mut WinSock::LINGER).cast(),
+            &mut len,
+        )
+    };
+    if r == WinSock::SOCKET_ERROR {
+        return Err(wsa_error());
+    }
+    Ok((value.l_onoff != 0).then(|| Duration::from_secs(value.l_linger as u64)))
+}
+
+pub(crate) fn set_ttl(sock: RawSocket, ttl: u32) -> io::Result<()> {
+    setsockopt_int(sock, WinSock::IPPROTO_IP, WinSock::IP_TTL, ttl as i32)
+}
+
+pub(crate) fn ttl(sock: RawSocket) -> io::Result<u32> {
+    Ok(getsockopt_int(sock, WinSock::IPPROTO_IP, WinSock::IP_TTL)? as u32)
+}
+
+/// `IP_TOS` -- see the POSIX side's identical option for the `u32`-vs-
+/// `u8` reasoning.
+pub(crate) fn set_tos_v4(sock: RawSocket, tos: u32) -> io::Result<()> {
+    setsockopt_int(sock, WinSock::IPPROTO_IP, WinSock::IP_TOS, tos as i32)
+}
+
+pub(crate) fn tos_v4(sock: RawSocket) -> io::Result<u32> {
+    Ok(getsockopt_int(sock, WinSock::IPPROTO_IP, WinSock::IP_TOS)? as u32)
+}
+
+/// The IPv6 equivalent of [`set_tos_v4`]/[`tos_v4`] (`IPV6_TCLASS`).
+pub(crate) fn set_tclass_v6(sock: RawSocket, tclass: u32) -> io::Result<()> {
+    setsockopt_int(
+        sock,
+        WinSock::IPPROTO_IPV6,
+        WinSock::IPV6_TCLASS,
+        tclass as i32,
+    )
+}
+
+pub(crate) fn tclass_v6(sock: RawSocket) -> io::Result<u32> {
+    Ok(getsockopt_int(sock, WinSock::IPPROTO_IPV6, WinSock::IPV6_TCLASS)? as u32)
 }
 
 pub(crate) fn set_nonblocking(sock: RawSocket, nonblocking: bool) -> io::Result<()> {
