@@ -200,6 +200,43 @@ fn lines_strips_trailing_newlines_and_ends_at_eof() {
 }
 
 #[test]
+fn fill_buf_returns_the_available_bytes_without_consuming_them() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut reader = BufReader::with_capacity(64, CountingReader::new(b"0123456789".to_vec()));
+
+        let peeked = reader.fill_buf().await.unwrap().to_vec();
+        assert_eq!(peeked, b"0123456789");
+        assert_eq!(
+            reader.get_ref().poll_read_calls,
+            1,
+            "fill_buf should have filled the buffer exactly once"
+        );
+
+        // Nothing was consumed, so a fresh `fill_buf` call returns the
+        // exact same bytes without triggering another underlying read.
+        let peeked_again = reader.fill_buf().await.unwrap().to_vec();
+        assert_eq!(peeked_again, b"0123456789");
+        assert_eq!(reader.get_ref().poll_read_calls, 1);
+
+        // A real read still sees the same bytes fill_buf only peeked at.
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"0123");
+    });
+}
+
+#[test]
+fn fill_buf_returns_empty_at_eof() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut reader = BufReader::new(CountingReader::new(Vec::new()));
+        let peeked = reader.fill_buf().await.unwrap();
+        assert!(peeked.is_empty());
+    });
+}
+
+#[test]
 fn buf_reader_and_buf_writer_round_trip_over_a_real_tcp_socket() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
