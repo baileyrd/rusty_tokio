@@ -295,3 +295,41 @@ fn thread_keep_alive_shrinks_the_blocking_pool_after_the_configured_idle_time() 
         assert_eq!(metrics.num_blocking_threads(), 0);
     });
 }
+
+#[test]
+fn enter_makes_the_runtime_ambient_for_constructing_things_outside_block_on() {
+    let rt = Runtime::new().unwrap();
+    let guard = rt.enter();
+    // Constructing a `Sleep` needs an ambient runtime (`Handle::current`
+    // internally) -- this would otherwise panic outside `block_on`/a
+    // spawned task.
+    let sleep = rusty_tokio::time::sleep(Duration::from_millis(1));
+    drop(guard);
+    rt.block_on(sleep);
+}
+
+#[test]
+#[should_panic]
+fn constructing_something_needing_an_ambient_runtime_panics_without_enter() {
+    let _rt = Runtime::new().unwrap();
+    // No `enter()` call -- this thread has no ambient runtime.
+    let sleep = rusty_tokio::time::sleep(Duration::from_millis(1));
+    drop(sleep);
+}
+
+#[test]
+fn dropping_the_enter_guard_restores_the_previous_ambient_runtime() {
+    let rt1 = Runtime::new().unwrap();
+    let rt2 = Runtime::new().unwrap();
+    rt1.block_on(async {
+        // Nested enter -- `rt2` becomes ambient, then `rt1` becomes
+        // ambient again once the guard drops.
+        {
+            let _guard = rt2.enter();
+            let sleep = rusty_tokio::time::sleep(Duration::from_millis(1));
+            drop(sleep);
+        }
+        // Still works with `rt1` ambient again after the guard dropped.
+        rusty_tokio::time::sleep(Duration::from_millis(1)).await;
+    });
+}
