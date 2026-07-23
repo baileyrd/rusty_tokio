@@ -323,9 +323,140 @@ pub trait AsyncReadExt: AsyncRead {
             Ok(n)
         }
     }
+
+    /// Reads from `self` until it hits EOF, then reads from `next` --
+    /// see [`Chain`].
+    fn chain<R: AsyncRead>(self, next: R) -> Chain<Self, R>
+    where
+        Self: Sized,
+    {
+        Chain {
+            first: self,
+            second: next,
+            first_done: false,
+        }
+    }
+
+    /// Limits `self` to at most `limit` bytes total, reporting EOF once
+    /// that's been reached even if `self` has more -- see [`Take`].
+    fn take(self, limit: u64) -> Take<Self>
+    where
+        Self: Sized,
+    {
+        Take { inner: self, limit }
+    }
 }
 
 impl<T: AsyncRead + ?Sized> AsyncReadExt for T {}
+
+/// Reads from `first` until it hits EOF, then reads from `second` -- see
+/// [`AsyncReadExt::chain`]. Requires both `A`/`B: Unpin` -- the same
+/// deliberate simplification `BufReader`/`BufWriter` already make (see
+/// that module's own docs) rather than hand-written unsafe pin
+/// projection for a case none of this crate's own reader types need.
+pub struct Chain<A, B> {
+    first: A,
+    second: B,
+    first_done: bool,
+}
+
+impl<A, B> Chain<A, B> {
+    pub fn get_ref(&self) -> (&A, &B) {
+        (&self.first, &self.second)
+    }
+
+    pub fn get_mut(&mut self) -> (&mut A, &mut B) {
+        (&mut self.first, &mut self.second)
+    }
+
+    pub fn into_inner(self) -> (A, B) {
+        (self.first, self.second)
+    }
+}
+
+impl<A: AsyncRead + Unpin, B: AsyncRead + Unpin> AsyncRead for Chain<A, B> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.first_done {
+            let before = buf.filled().len();
+            match Pin::new(&mut self.first).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) => {
+                    if buf.filled().len() == before {
+                        // Nothing new filled -- `first` hit EOF.
+                        self.first_done = true;
+                    } else {
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+                other => return other,
+            }
+        }
+        Pin::new(&mut self.second).poll_read(cx, buf)
+    }
+}
+
+/// Limits a reader to at most `limit` bytes total, reporting EOF once
+/// that's been reached even if the inner reader has more -- see
+/// [`AsyncReadExt::take`]. Requires `R: Unpin`, same reasoning as
+/// [`Chain`] above.
+pub struct Take<R> {
+    inner: R,
+    limit: u64,
+}
+
+impl<R> Take<R> {
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
+    /// Changes the remaining byte limit going forward -- doesn't affect
+    /// how much has already been read.
+    pub fn set_limit(&mut self, limit: u64) {
+        self.limit = limit;
+    }
+
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Take<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.limit == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let max = self.limit.min(buf.remaining() as u64) as usize;
+        let result;
+        let n;
+        {
+            // Reborrows `buf`'s own unfilled memory directly (capped to
+            // `max`) rather than reading into a scratch buffer and
+            // copying -- the inner reader writes straight into the
+            // caller's own buffer, same as an unrestricted read would.
+            let mut limited = ReadBuf::new(&mut buf.unfilled_mut()[..max]);
+            result = Pin::new(&mut self.inner).poll_read(cx, &mut limited);
+            n = limited.filled().len();
+        }
+        buf.advance(n);
+        self.limit -= n as u64;
+        result
+    }
+}
 
 /// Write-side counterpart of [`read_int_method`] -- see that macro's
 /// docs.
