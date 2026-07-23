@@ -558,3 +558,66 @@ pub async fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
         .await
         .unwrap_or_else(|_| Err(poisoned_error()))
 }
+
+/// Returns the canonical, absolute form of `path` (symlinks resolved,
+/// `.`/`..` resolved). See `std::fs::canonicalize`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn canonicalize(path: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::canonicalize(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Queries the metadata of the file/directory at `path`, following a
+/// symlink at `path` itself. See `std::fs::metadata`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Metadata> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::metadata(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Like [`metadata`], but doesn't follow a symlink at `path` itself --
+/// see `std::fs::symlink_metadata`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Metadata> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::symlink_metadata(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Whether `path` exists -- unlike a bare `metadata(path).await.is_ok()`,
+/// distinguishes "confirmed absent" (`Ok(false)`) from "couldn't tell"
+/// (permission denied, etc., still an `Err`). See
+/// `std::path::Path::try_exists`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn try_exists(path: impl AsRef<Path>) -> io::Result<bool> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || path.try_exists())
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Sets `path`'s permissions. See `std::fs::set_permissions` -- for an
+/// already-open [`File`], prefer [`File::set_permissions`], which
+/// avoids a second path lookup.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn set_permissions(path: impl AsRef<Path>, perm: std::fs::Permissions) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::set_permissions(path, perm))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}

@@ -342,3 +342,87 @@ fn max_buf_size_defaults_then_can_be_changed_and_caps_a_single_read() {
     });
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn metadata_reports_file_length() {
+    let path = temp_path("metadata");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"0123456789").await.unwrap();
+        drop(file);
+
+        let meta = rusty_tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(meta.len(), 10);
+        assert!(meta.is_file());
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_metadata_does_not_follow_the_symlink_itself() {
+    let target = temp_path("symlink-metadata-target");
+    let link = temp_path("symlink-metadata-link");
+    std::fs::write(&target, b"hello").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let meta = rusty_tokio::fs::symlink_metadata(&link).await.unwrap();
+        assert!(meta.file_type().is_symlink());
+
+        // Plain `metadata` follows the link through to the real file.
+        let followed = rusty_tokio::fs::metadata(&link).await.unwrap();
+        assert!(followed.is_file());
+        assert_eq!(followed.len(), 5);
+    });
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_file(&target).unwrap();
+}
+
+#[test]
+fn try_exists_reports_true_for_a_real_path_and_false_for_a_missing_one() {
+    let path = temp_path("try-exists");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        assert!(!rusty_tokio::fs::try_exists(&path).await.unwrap());
+
+        std::fs::write(&path, b"here").unwrap();
+        assert!(rusty_tokio::fs::try_exists(&path).await.unwrap());
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn canonicalize_resolves_to_an_absolute_path() {
+    let path = temp_path("canonicalize");
+    std::fs::write(&path, b"content").unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let canonical = rusty_tokio::fs::canonicalize(&path).await.unwrap();
+        assert!(canonical.is_absolute());
+        assert!(canonical.ends_with(path.file_name().unwrap()));
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn free_set_permissions_applies_without_an_open_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("free-set-permissions");
+    std::fs::write(&path, b"content").unwrap();
+    let mut perm = std::fs::metadata(&path).unwrap().permissions();
+    perm.set_mode(0o640);
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::set_permissions(&path, perm).await.unwrap();
+    });
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640);
+    std::fs::remove_file(&path).unwrap();
+}
