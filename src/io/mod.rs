@@ -39,6 +39,8 @@ mod duplex;
 mod interest;
 mod join;
 mod lookup;
+#[cfg(unix)]
+mod pipe;
 pub(crate) mod reactor;
 mod readiness;
 mod simplex;
@@ -67,6 +69,8 @@ pub use duplex::{duplex, DuplexStream};
 pub use interest::{Interest, Ready};
 pub use join::{join, Join};
 pub use lookup::{lookup_host, LookupHost};
+#[cfg(unix)]
+pub use pipe::{pipe, PipeOpenOptions, PipeReceiver, PipeSender};
 pub use simplex::{simplex, SimplexStream};
 pub use split::{split, SplitReadHalf, SplitWriteHalf};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
