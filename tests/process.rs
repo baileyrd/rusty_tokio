@@ -179,3 +179,34 @@ fn arg0_sets_argv_zero_without_changing_which_binary_actually_runs() {
         assert!(status.success());
     });
 }
+
+#[test]
+fn as_std_reflects_the_builder_state_set_so_far() {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg("exit 0");
+    assert_eq!(cmd.as_std().get_program(), "/bin/sh");
+    assert_eq!(
+        cmd.as_std().get_args().collect::<Vec<_>>(),
+        vec!["-c", "exit 0"]
+    );
+}
+
+#[test]
+fn as_std_mut_setters_apply_to_the_spawned_child() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo $FROM_AS_STD_MUT");
+        cmd.as_std_mut().env("FROM_AS_STD_MUT", "yes");
+        cmd.stdout(Stdio::piped());
+
+        let mut child = cmd.spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut contents = Vec::new();
+        stdout.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"yes\n");
+
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+    });
+}
