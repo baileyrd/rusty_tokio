@@ -19,6 +19,7 @@ struct Inner {
     live_threads: AtomicUsize,
     max_threads: usize,
     idle_timeout: Duration,
+    thread_config: super::ThreadConfig,
 }
 
 pub(crate) struct BlockingPool {
@@ -26,7 +27,11 @@ pub(crate) struct BlockingPool {
 }
 
 impl BlockingPool {
-    pub(crate) fn new(max_threads: usize) -> Self {
+    pub(crate) fn new(
+        max_threads: usize,
+        thread_config: super::ThreadConfig,
+        idle_timeout: Duration,
+    ) -> Self {
         assert!(max_threads > 0, "a blocking pool needs at least one thread");
         BlockingPool {
             inner: Arc::new(Inner {
@@ -35,7 +40,8 @@ impl BlockingPool {
                 shutdown: AtomicBool::new(false),
                 live_threads: AtomicUsize::new(0),
                 max_threads,
-                idle_timeout: Duration::from_secs(10),
+                idle_timeout,
+                thread_config,
             }),
         }
     }
@@ -69,8 +75,9 @@ impl BlockingPool {
                 .is_ok()
             {
                 let inner = self.inner.clone();
-                std::thread::Builder::new()
-                    .name("rusty_tokio-blocking".to_string())
+                inner
+                    .thread_config
+                    .thread_builder(|| "rusty_tokio-blocking".to_string())
                     .spawn(move || Self::worker_loop(inner))
                     .expect("failed to spawn rusty_tokio blocking-pool thread");
                 return;
