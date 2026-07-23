@@ -35,7 +35,7 @@ pub use builder::Builder;
 pub use id::{try_id, try_name, TaskId};
 pub use join::{AbortHandle, JoinError, JoinHandle};
 pub use join_set::JoinSet;
-pub use local::{spawn_local, LocalSet};
+pub use local::{spawn_local, LocalEnterGuard, LocalSet};
 pub use local_key::{AccessError, LocalKey, TaskLocalFuture};
 pub use yield_now::{yield_now, YieldNow};
 
