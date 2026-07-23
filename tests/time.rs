@@ -1,4 +1,4 @@
-use rusty_tokio::time::{interval_at, MissedTickBehavior};
+use rusty_tokio::time::{interval_at, timeout_at, MissedTickBehavior};
 use rusty_tokio::Runtime;
 use std::time::{Duration, Instant};
 
@@ -117,5 +117,45 @@ fn missed_tick_delay_resets_the_schedule_from_the_actual_fire_time() {
         assert!(third >= before_second + period);
         assert!(third < before_second + period * 2);
         assert!(before_third.elapsed() < period * 2);
+    });
+}
+
+#[test]
+fn timeout_at_resolves_ok_when_the_future_finishes_before_the_deadline() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let result = timeout_at(deadline, async { 42 }).await;
+        assert_eq!(result, Ok(42));
+    });
+}
+
+#[test]
+fn timeout_at_resolves_elapsed_once_the_deadline_passes() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let result = timeout_at(
+            deadline,
+            rusty_tokio::time::sleep(Duration::from_secs(3600)),
+        )
+        .await;
+        assert!(result.is_err());
+    });
+}
+
+#[test]
+fn timeout_at_with_an_already_passed_deadline_resolves_elapsed_immediately() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let deadline = Instant::now() - Duration::from_millis(10);
+        let before = Instant::now();
+        let result = timeout_at(
+            deadline,
+            rusty_tokio::time::sleep(Duration::from_secs(3600)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(before.elapsed() < Duration::from_millis(200));
     });
 }
