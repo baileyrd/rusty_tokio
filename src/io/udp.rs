@@ -92,6 +92,19 @@ impl UdpSocket {
         self.inner.local_addr().map_err(from_platform_err)
     }
 
+    /// `SO_BINDTODEVICE` -- see [`crate::io::TcpSocket::bind_device`] for
+    /// the full explanation; identical option, UDP side.
+    #[cfg(target_os = "linux")]
+    pub fn bind_device(&self, interface: Option<&[u8]>) -> io::Result<()> {
+        socket::set_bind_device(self.inner.as_raw_io(), interface)
+    }
+
+    /// The reverse of [`bind_device`](Self::bind_device).
+    #[cfg(target_os = "linux")]
+    pub fn device(&self) -> io::Result<Option<Vec<u8>>> {
+        socket::bind_device(self.inner.as_raw_io())
+    }
+
     /// Adopts an already-bound `std` socket -- e.g. one received from a
     /// supervisor process, or configured with `socket2` for an option
     /// this crate doesn't expose a wrapper for. Flips it non-blocking

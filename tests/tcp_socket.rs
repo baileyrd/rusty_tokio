@@ -96,3 +96,28 @@ fn buffer_sizes_set_and_read_back_at_least_the_requested_size() {
         assert!(socket.recv_buffer_size().unwrap() >= requested);
     });
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bind_device_defaults_to_none() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = TcpSocket::new_v4().unwrap();
+        assert_eq!(socket.device().unwrap(), None);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bind_device_set_and_read_back_then_cleared() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = TcpSocket::new_v4().unwrap();
+
+        socket.bind_device(Some(b"lo")).unwrap();
+        assert_eq!(socket.device().unwrap().as_deref(), Some(&b"lo"[..]));
+
+        socket.bind_device(None).unwrap();
+        assert_eq!(socket.device().unwrap(), None);
+    });
+}
