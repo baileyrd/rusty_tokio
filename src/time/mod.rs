@@ -442,6 +442,38 @@ impl Interval {
         self.missed_tick_behavior = behavior;
     }
 
+    /// The configured period between ticks.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
+    /// Resets so the next tick fires one period from now, discarding
+    /// whatever's currently scheduled. Unlike a tick actually delivered
+    /// through [`MissedTickBehavior`], this always measures from *now*
+    /// regardless of the configured behavior -- the same one-shot
+    /// "restart the schedule" tokio's own `reset` documents.
+    pub fn reset(&mut self) {
+        self.reset_after(self.period);
+    }
+
+    /// Resets so the next tick fires immediately.
+    pub fn reset_immediately(&mut self) {
+        self.next_deadline = current_time();
+        self.sleep = None;
+    }
+
+    /// Resets so the next tick fires `after` from now.
+    pub fn reset_after(&mut self, after: Duration) {
+        self.next_deadline = current_time() + after;
+        self.sleep = None;
+    }
+
+    /// Resets so the next tick fires at the given absolute `deadline`.
+    pub fn reset_at(&mut self, deadline: Instant) {
+        self.next_deadline = deadline;
+        self.sleep = None;
+    }
+
     /// Waits for the next tick, returning the `Instant` it was
     /// scheduled for.
     pub async fn tick(&mut self) -> Instant {
