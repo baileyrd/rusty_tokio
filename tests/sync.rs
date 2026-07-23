@@ -560,6 +560,71 @@ fn owned_semaphore_permit_merge_panics_across_different_semaphores() {
 }
 
 #[test]
+fn semaphore_const_new_is_usable_in_a_static() {
+    static SEM: Semaphore = Semaphore::const_new(2);
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        assert_eq!(SEM.available_permits(), 2);
+        let _permit = SEM.acquire().await;
+        assert_eq!(SEM.available_permits(), 1);
+    });
+}
+
+#[test]
+fn semaphore_max_permits_is_usize_max_shifted_by_three() {
+    assert_eq!(Semaphore::MAX_PERMITS, usize::MAX >> 3);
+}
+
+#[test]
+#[should_panic(expected = "MAX_PERMITS")]
+fn semaphore_new_panics_past_max_permits() {
+    let _ = Semaphore::new(Semaphore::MAX_PERMITS + 1);
+}
+
+#[test]
+fn forget_permits_permanently_reduces_availability_without_needing_a_release() {
+    let semaphore = Semaphore::new(5);
+    let forgotten = semaphore.forget_permits(2);
+    assert_eq!(forgotten, 2);
+    assert_eq!(semaphore.available_permits(), 3);
+}
+
+#[test]
+fn forget_permits_saturates_at_whatever_is_actually_available() {
+    let semaphore = Semaphore::new(2);
+    let forgotten = semaphore.forget_permits(10);
+    assert_eq!(forgotten, 2);
+    assert_eq!(semaphore.available_permits(), 0);
+}
+
+#[test]
+fn forget_permits_does_not_wake_or_grant_any_queued_waiter() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let _held = semaphore.acquire().await; // exhaust the single permit
+
+        let semaphore2 = semaphore.clone();
+        let waiter = rusty_tokio::spawn(async move {
+            let _permit = semaphore2.acquire().await;
+        });
+
+        // Give the waiter a chance to actually queue.
+        rusty_tokio::task::yield_now().await;
+        // Forgetting from an already-exhausted semaphore has nothing to
+        // reclaim (0 available), so nothing is forgotten and the queued
+        // waiter is left exactly as it was -- still waiting.
+        assert_eq!(semaphore.forget_permits(1), 0);
+
+        let timed_out = rusty_tokio::time::timeout(Duration::from_millis(20), waiter).await;
+        assert!(
+            timed_out.is_err(),
+            "forget_permits must not grant a permit to a queued waiter"
+        );
+    });
+}
+
+#[test]
 fn watch_initial_value_is_observable_without_waiting() {
     let (_tx, rx) = rusty_tokio::sync::watch::channel(42);
     assert_eq!(*rx.borrow(), 42);
