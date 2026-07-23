@@ -301,9 +301,10 @@
 //!   exists today for pre-1.68 compatibility and re-export convenience)
 //!   already does the exact same stack-pinning job and is what this
 //!   crate's own `block_on` uses internally
-//!   (`std::pin::pin!(future)` in `runtime::block_on_inner`) -- adding a
+//!   (`std::pin::pin!(future)` in `runtime::block_on_inner`) -- writing a
 //!   second macro that does the same thing would be redundant, not a
-//!   real gap.
+//!   real gap. [`pin`] below is just a re-export of `std`'s own, for
+//!   surface parity with tokio's own top-level `tokio::pin!`.
 
 pub mod fs;
 pub mod io;
@@ -321,6 +322,7 @@ mod runtime;
 
 pub use runtime::{Builder, Handle, Runtime, RuntimeMetrics};
 pub use rusty_tokio_macros::{main, test};
+pub use std::pin::pin;
 pub use task::{JoinError, JoinHandle};
 
 use std::future::Future;
