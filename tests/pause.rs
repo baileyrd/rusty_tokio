@@ -205,6 +205,22 @@ fn sleep_reset_after_a_poll_cancels_the_stale_registration_and_rearms() {
 }
 
 #[test]
+fn sleep_is_elapsed_is_false_before_the_deadline_and_true_after() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let sleeper = time::sleep(Duration::from_secs(5));
+        assert!(!sleeper.is_elapsed());
+
+        time::advance(Duration::from_secs(3)).await;
+        assert!(!sleeper.is_elapsed());
+
+        time::advance(Duration::from_secs(2)).await;
+        assert!(sleeper.is_elapsed());
+    });
+}
+
+#[test]
 fn interval_period_reports_the_configured_period() {
     let rt = Builder::new_current_thread().build().unwrap();
     rt.block_on(async {
