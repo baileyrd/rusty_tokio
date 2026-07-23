@@ -351,6 +351,15 @@ pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
     }
 }
 
+/// Race `future` against a fixed `deadline`, rather than a `duration`
+/// measured from now.
+pub fn timeout_at<F: Future>(deadline: Instant, future: F) -> Timeout<F> {
+    Timeout {
+        future: Box::pin(future),
+        sleep: sleep_until(deadline),
+    }
+}
+
 impl<F: Future> Future for Timeout<F> {
     type Output = Result<F::Output, Elapsed>;
 
