@@ -152,6 +152,29 @@ impl Handle {
         self.shared.is_current_thread()
     }
 
+    /// Which scheduling flavor this handle's runtime was built with --
+    /// see [`super::RuntimeFlavor`].
+    pub fn runtime_flavor(&self) -> super::RuntimeFlavor {
+        if self.is_current_thread() {
+            super::RuntimeFlavor::CurrentThread
+        } else {
+            super::RuntimeFlavor::MultiThread
+        }
+    }
+
+    /// An opaque identifier for this handle's runtime, unique among
+    /// other currently-running [`crate::Runtime`]s -- see
+    /// [`super::Id`].
+    pub fn id(&self) -> super::Id {
+        self.shared.id
+    }
+
+    /// This runtime's own name, set via [`super::Builder::name`] --
+    /// `None` unless that was called.
+    pub fn name(&self) -> Option<&str> {
+        self.shared.name.as_deref()
+    }
+
     /// A live view into this runtime's scheduler and blocking pool --
     /// queue depths, steal/park counts per worker, blocking-pool thread
     /// count. See [`super::RuntimeMetrics`] for what's on it.

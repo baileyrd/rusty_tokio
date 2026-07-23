@@ -378,3 +378,45 @@ fn try_current_detailed_reports_shutdown_once_the_runtime_starts_shutting_down()
 
     drop(guard);
 }
+
+#[test]
+fn runtime_flavor_reports_current_thread_or_multi_thread() {
+    let multi = Runtime::new().unwrap();
+    let multi_guard = multi.enter();
+    assert_eq!(
+        rusty_tokio::Handle::current().runtime_flavor(),
+        rusty_tokio::RuntimeFlavor::MultiThread
+    );
+    drop(multi_guard);
+
+    let current_thread = rusty_tokio::Builder::new_current_thread().build().unwrap();
+    let current_thread_guard = current_thread.enter();
+    assert_eq!(
+        rusty_tokio::Handle::current().runtime_flavor(),
+        rusty_tokio::RuntimeFlavor::CurrentThread
+    );
+    drop(current_thread_guard);
+}
+
+#[test]
+fn runtime_id_is_distinct_across_runtimes() {
+    let a = Runtime::new().unwrap();
+    let b = Runtime::new().unwrap();
+    assert_ne!(a.handle().id(), b.handle().id());
+    assert_eq!(a.handle().id(), a.handle().id());
+}
+
+#[test]
+fn runtime_name_defaults_to_none_then_reflects_the_builder() {
+    let unnamed = Runtime::new().unwrap();
+    assert_eq!(unnamed.handle().name(), None);
+
+    let named = Runtime::builder().name("my-runtime").build().unwrap();
+    assert_eq!(named.handle().name(), Some("my-runtime"));
+}
+
+#[test]
+#[should_panic(expected = "runtime name shouldn't be empty")]
+fn runtime_name_panics_on_an_empty_name() {
+    let _ = Runtime::builder().name("");
+}
