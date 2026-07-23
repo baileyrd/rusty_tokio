@@ -63,12 +63,14 @@ fn blocking_pool_panicked() -> io::Error {
 /// module's own docs for why `spawn()`'s result differs from std's.
 pub struct Command {
     inner: std::process::Command,
+    kill_on_drop: bool,
 }
 
 impl Command {
     pub fn new(program: impl AsRef<OsStr>) -> Command {
         Command {
             inner: std::process::Command::new(program),
+            kill_on_drop: false,
         }
     }
 
@@ -163,6 +165,25 @@ impl Command {
         &mut self.inner
     }
 
+    /// Whether the spawned [`Child`] should be killed if it's dropped
+    /// while still running -- `false` by default, matching
+    /// `std::process::Child`'s own "drop just orphans it" behavior.
+    /// When `true`, [`Child`]'s `Drop` impl sends `SIGKILL` (best
+    /// effort -- errors are ignored, there's nothing a destructor could
+    /// do about them) and, if a [`crate::Runtime`] is still running on
+    /// the dropping thread, detaches a [`crate::spawn_blocking`] task to
+    /// reap it afterward so it doesn't linger as a zombie.
+    pub fn kill_on_drop(&mut self, kill_on_drop: bool) -> &mut Command {
+        self.kill_on_drop = kill_on_drop;
+        self
+    }
+
+    /// The value most recently passed to
+    /// [`kill_on_drop`](Self::kill_on_drop) (`false` if never called).
+    pub fn get_kill_on_drop(&self) -> bool {
+        self.kill_on_drop
+    }
+
     /// Spawns the child. `fork`/`exec` themselves run synchronously,
     /// right here -- like tokio's own `Command::spawn`, this crate treats
     /// process creation as fast enough not to need `spawn_blocking`
@@ -186,6 +207,7 @@ impl Command {
             inner: Some(child),
             id,
             status: None,
+            kill_on_drop: self.kill_on_drop,
             stdin,
             stdout,
             stderr,
@@ -210,6 +232,9 @@ pub struct Child {
     /// (which would be, at best, redundant, and on some platforms an
     /// outright error).
     status: Option<ExitStatus>,
+    /// Set from [`Command::kill_on_drop`] at [`Command::spawn`] time --
+    /// see this `Child`'s own `Drop` impl for what it does.
+    kill_on_drop: bool,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -282,6 +307,38 @@ impl Child {
             .unwrap_or_else(|_| Err(blocking_pool_panicked()))?;
         self.status = Some(status);
         Ok(status)
+    }
+}
+
+impl Drop for Child {
+    /// A no-op unless [`Command::kill_on_drop`] was set: `std`'s (and
+    /// this crate's) default is to leave a dropped-but-still-running
+    /// child orphaned, exactly like dropping a `std::process::Child`
+    /// does. When it was set, sends `SIGKILL` (best effort -- a
+    /// destructor has no way to surface or act on a failure) and, if a
+    /// [`crate::Runtime`] is still running on the dropping thread,
+    /// detaches a [`crate::spawn_blocking`] task to `wait()` on it
+    /// afterward so the kernel doesn't have to keep it around as a
+    /// zombie until some unrelated `wait` call happens to reap it.
+    /// `Drop` can't itself `.await`, so this is the same
+    /// signal-now/reap-separately shape [`Child::wait`] already needs
+    /// for the blocking `wait(2)` syscall, just fired off rather than
+    /// awaited. With no runtime running here, the kill still goes out;
+    /// only the reap is skipped (the same zombie-until-reaped state a
+    /// signal-only kill would always leave behind).
+    fn drop(&mut self) {
+        if !self.kill_on_drop {
+            return;
+        }
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
+        let _ = inner.kill();
+        if let Some(handle) = Handle::try_current() {
+            handle.spawn_blocking(move || {
+                let _ = inner.wait();
+            });
+        }
     }
 }
 
