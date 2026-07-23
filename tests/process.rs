@@ -204,6 +204,62 @@ fn process_group_zero_makes_the_child_its_own_group_leader() {
 }
 
 #[test]
+fn kill_on_drop_kills_a_still_running_child_when_dropped() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30");
+        cmd.kill_on_drop(true);
+        assert!(cmd.get_kill_on_drop());
+
+        let child = cmd.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+
+        drop(child);
+
+        // Give the detached reap task a moment to actually run.
+        rusty_tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // ESRCH: no such process -- killed *and* reaped, so it isn't
+        // even lingering as a zombie a plain `kill` alone would leave.
+        let err = unsafe { libc::kill(pid, 0) };
+        assert_eq!(err, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    });
+}
+
+#[test]
+fn kill_on_drop_defaults_to_false_and_leaves_a_running_child_alone() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30");
+        assert!(!cmd.get_kill_on_drop());
+
+        let child = cmd.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        drop(child);
+
+        rusty_tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Still alive -- a plain drop (kill_on_drop left at its default)
+        // just orphans it, same as dropping a std::process::Child.
+        let err = unsafe { libc::kill(pid, 0) };
+        assert_eq!(err, 0, "child should still be running after a plain drop");
+
+        // Clean up so it doesn't linger as a zombie for the rest of
+        // this test process's life.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        }
+    });
+}
+
+#[test]
 fn as_std_reflects_the_builder_state_set_so_far() {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg("exit 0");
