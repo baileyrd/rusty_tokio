@@ -1,6 +1,6 @@
 use rusty_tokio::io::{
-    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
-    ReadBuf, TcpListener, TcpStream,
+    duplex, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    BufStream, BufWriter, ReadBuf, TcpListener, TcpStream,
 };
 use rusty_tokio::Runtime;
 use std::io;
@@ -221,5 +221,82 @@ fn buf_reader_and_buf_writer_round_trip_over_a_real_tcp_socket() {
 
         let received = server.await.unwrap();
         assert_eq!(received, "buffered over tcp\n");
+    });
+}
+
+#[test]
+fn buf_stream_batches_writes_and_serves_reads_from_one_underlying_fill() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (mut peer, stream) = duplex(256);
+        let mut buf_stream = BufStream::with_capacity(64, 64, stream);
+
+        buf_stream.write_all(b"hello").await.unwrap();
+        buf_stream.write_all(b", world").await.unwrap();
+        // Nothing reaches the duplex peer until flushed -- same
+        // batching behavior as a plain `BufWriter`.
+        let poll_before_flush =
+            rusty_tokio::time::timeout(std::time::Duration::from_millis(20), async {
+                let mut probe = [0u8; 1];
+                peer.read(&mut probe).await
+            })
+            .await;
+        assert!(
+            poll_before_flush.is_err(),
+            "nothing should have reached the peer before flush"
+        );
+
+        buf_stream.flush().await.unwrap();
+        let mut received = [0u8; 12];
+        peer.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"hello, world");
+
+        peer.write_all(b"reply").await.unwrap();
+        let mut reply = [0u8; 5];
+        buf_stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"reply");
+    });
+}
+
+#[test]
+fn buf_stream_get_ref_get_mut_into_inner_reach_the_wrapped_stream() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (_peer, stream) = duplex(64);
+        let mut buf_stream = BufStream::new(stream);
+        let _ = buf_stream.get_ref();
+        let _ = buf_stream.get_mut();
+        let _inner = buf_stream.into_inner();
+    });
+}
+
+#[test]
+fn buf_stream_round_trips_over_a_real_tcp_socket() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf_stream = BufStream::new(stream);
+            let mut line = String::new();
+            buf_stream.read_line(&mut line).await.unwrap();
+            buf_stream.write_all(b"ack\n").await.unwrap();
+            buf_stream.flush().await.unwrap();
+            line
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let mut buf_stream = BufStream::new(client);
+        buf_stream.write_all(b"buffered both ways\n").await.unwrap();
+        buf_stream.flush().await.unwrap();
+
+        let mut ack = String::new();
+        buf_stream.read_line(&mut ack).await.unwrap();
+        assert_eq!(ack, "ack\n");
+
+        let received = server.await.unwrap();
+        assert_eq!(received, "buffered both ways\n");
     });
 }

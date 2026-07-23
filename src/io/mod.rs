@@ -57,7 +57,7 @@ pub use async_io::{
     copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
     AsyncSeekExt, AsyncWrite, AsyncWriteExt, Chain, ReadBuf, Take,
 };
-pub use buffered::{BufReader, BufWriter, Lines};
+pub use buffered::{BufReader, BufStream, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
 pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
