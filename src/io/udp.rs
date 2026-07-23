@@ -6,6 +6,8 @@ use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -314,6 +316,100 @@ impl UdpSocket {
     #[cfg(target_os = "linux")]
     pub fn device(&self) -> io::Result<Option<Vec<u8>>> {
         socket::bind_device(self.inner.as_raw_io())
+    }
+
+    /// Runs `f` against a temporary, non-owning `std::net::UdpSocket`
+    /// wrapping this socket's raw fd -- `std::net::UdpSocket` already has
+    /// safe wrappers for every multicast/broadcast `setsockopt` this
+    /// crate wants (`join_multicast_v4`, `set_broadcast`, etc.), so
+    /// there's no need to hand-roll the raw `IP_ADD_MEMBERSHIP`/
+    /// `SO_BROADCAST`/etc. plumbing a second time the way
+    /// [`bind_device`](Self::bind_device) has to for an option `std`
+    /// doesn't cover. `mem::forget`ing the temporary afterward is what
+    /// makes this non-owning: without it, the temporary's own `Drop`
+    /// would close the fd out from under `self.inner`, which still
+    /// thinks it owns it.
+    #[cfg(unix)]
+    fn with_std<R>(&self, f: impl FnOnce(&std::net::UdpSocket) -> R) -> R {
+        use std::os::fd::FromRawFd;
+        // SAFETY: `as_raw_io()` is a valid, currently-open fd owned by
+        // `self.inner`; `mem::forget` below stops this temporary
+        // `std::net::UdpSocket` from double-closing it on drop.
+        let borrowed = unsafe { std::net::UdpSocket::from_raw_fd(self.inner.as_raw_io()) };
+        let result = f(&borrowed);
+        std::mem::forget(borrowed);
+        result
+    }
+
+    /// Joins an IPv4 multicast group -- see
+    /// `std::net::UdpSocket::join_multicast_v4`.
+    #[cfg(unix)]
+    pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        self.with_std(|s| s.join_multicast_v4(&multiaddr, &interface))
+    }
+
+    /// Leaves an IPv4 multicast group previously joined with
+    /// [`join_multicast_v4`](Self::join_multicast_v4) -- see
+    /// `std::net::UdpSocket::leave_multicast_v4`.
+    #[cfg(unix)]
+    pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        self.with_std(|s| s.leave_multicast_v4(&multiaddr, &interface))
+    }
+
+    /// Joins an IPv6 multicast group -- see
+    /// `std::net::UdpSocket::join_multicast_v6`.
+    #[cfg(unix)]
+    pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        self.with_std(|s| s.join_multicast_v6(multiaddr, interface))
+    }
+
+    /// Leaves an IPv6 multicast group previously joined with
+    /// [`join_multicast_v6`](Self::join_multicast_v6) -- see
+    /// `std::net::UdpSocket::leave_multicast_v6`.
+    #[cfg(unix)]
+    pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        self.with_std(|s| s.leave_multicast_v6(multiaddr, interface))
+    }
+
+    /// Whether outgoing IPv4 multicast packets sent from this socket are
+    /// looped back to the local host's own listeners -- see
+    /// `std::net::UdpSocket::set_multicast_loop_v4`.
+    #[cfg(unix)]
+    pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
+        self.with_std(|s| s.set_multicast_loop_v4(on))
+    }
+
+    /// The reverse of [`set_multicast_loop_v4`](Self::set_multicast_loop_v4).
+    #[cfg(unix)]
+    pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+        self.with_std(|s| s.multicast_loop_v4())
+    }
+
+    /// The IPv6 equivalent of
+    /// [`set_multicast_loop_v4`](Self::set_multicast_loop_v4).
+    #[cfg(unix)]
+    pub fn set_multicast_loop_v6(&self, on: bool) -> io::Result<()> {
+        self.with_std(|s| s.set_multicast_loop_v6(on))
+    }
+
+    /// The reverse of [`set_multicast_loop_v6`](Self::set_multicast_loop_v6).
+    #[cfg(unix)]
+    pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+        self.with_std(|s| s.multicast_loop_v6())
+    }
+
+    /// The TTL outgoing IPv4 multicast packets are sent with, distinct
+    /// from unicast traffic's own TTL -- see
+    /// `std::net::UdpSocket::set_multicast_ttl_v4`.
+    #[cfg(unix)]
+    pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
+        self.with_std(|s| s.set_multicast_ttl_v4(ttl))
+    }
+
+    /// The reverse of [`set_multicast_ttl_v4`](Self::set_multicast_ttl_v4).
+    #[cfg(unix)]
+    pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
+        self.with_std(|s| s.multicast_ttl_v4())
     }
 
     /// Adopts an already-bound `std` socket -- e.g. one received from a

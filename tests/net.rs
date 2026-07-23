@@ -294,3 +294,109 @@ fn udp_socket_bind_device_set_and_read_back_then_cleared() {
         assert_eq!(socket.device().unwrap(), None);
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_v4_join_and_leave_succeed() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let multiaddr: std::net::Ipv4Addr = "224.0.0.113".parse().unwrap();
+        let interface = std::net::Ipv4Addr::UNSPECIFIED;
+
+        socket.join_multicast_v4(multiaddr, interface).unwrap();
+        socket.leave_multicast_v4(multiaddr, interface).unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_v6_join_and_leave_succeed() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // Some sandboxed/CI environments have no IPv6 stack at all --
+        // skip rather than fail on an environment limitation this test
+        // isn't meant to exercise.
+        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+            eprintln!("skipping: no IPv6 support in this environment");
+            return;
+        };
+        let multiaddr: std::net::Ipv6Addr = "ff02::1234".parse().unwrap();
+
+        socket.join_multicast_v6(&multiaddr, 0).unwrap();
+        socket.leave_multicast_v6(&multiaddr, 0).unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_loop_v4_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        socket.set_multicast_loop_v4(false).unwrap();
+        assert!(!socket.multicast_loop_v4().unwrap());
+        socket.set_multicast_loop_v4(true).unwrap();
+        assert!(socket.multicast_loop_v4().unwrap());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_loop_v6_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let Ok(socket) = UdpSocket::bind("[::]:0".parse().unwrap()) else {
+            eprintln!("skipping: no IPv6 support in this environment");
+            return;
+        };
+        socket.set_multicast_loop_v6(false).unwrap();
+        assert!(!socket.multicast_loop_v6().unwrap());
+        socket.set_multicast_loop_v6(true).unwrap();
+        assert!(socket.multicast_loop_v6().unwrap());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_ttl_v4_set_and_read_back() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        socket.set_multicast_ttl_v4(5).unwrap();
+        assert_eq!(socket.multicast_ttl_v4().unwrap(), 5);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_multicast_v4_round_trip_over_loopback() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let multiaddr: std::net::Ipv4Addr = "224.0.0.114".parse().unwrap();
+        let interface = std::net::Ipv4Addr::UNSPECIFIED;
+
+        let receiver = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let port = receiver.local_addr().unwrap().port();
+        receiver.join_multicast_v4(multiaddr, interface).unwrap();
+
+        let sender = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        sender.set_multicast_loop_v4(true).unwrap();
+        sender
+            .send_to(b"multicast hello", SocketAddr::new(multiaddr.into(), port))
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 32];
+        let (n, _from) = rusty_tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            receiver.recv_from(&mut buf),
+        )
+        .await
+        .expect("should receive the looped-back multicast datagram")
+        .unwrap();
+        assert_eq!(&buf[..n], b"multicast hello");
+
+        receiver.leave_multicast_v4(multiaddr, interface).unwrap();
+    });
+}
