@@ -37,11 +37,13 @@ mod buffered;
 mod compat;
 mod duplex;
 mod interest;
+mod join;
 mod lookup;
 pub(crate) mod reactor;
 mod readiness;
 mod simplex;
 pub(crate) mod socket;
+mod split;
 mod stdio;
 mod tcp;
 mod udp;
@@ -62,8 +64,10 @@ pub use buffered::{BufReader, BufStream, BufWriter, Lines};
 pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
 pub use interest::{Interest, Ready};
+pub use join::{join, Join};
 pub use lookup::{lookup_host, LookupHost};
 pub use simplex::{simplex, SimplexStream};
+pub use split::{split, SplitReadHalf, SplitWriteHalf};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{
     OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpSocket, TcpStream, WriteHalf,
