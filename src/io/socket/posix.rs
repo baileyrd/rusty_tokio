@@ -45,6 +45,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::Duration;
 
 fn cvt(ret: c_int) -> io::Result<c_int> {
     if ret < 0 {
@@ -636,6 +637,123 @@ pub(crate) fn bind_device(fd: RawFd) -> io::Result<Option<Vec<u8>>> {
     }
     let name_len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     Ok(Some(buf[..name_len].to_vec()))
+}
+
+pub(crate) fn set_keepalive(fd: RawFd, keepalive: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, keepalive as c_int)
+}
+
+pub(crate) fn keepalive(fd: RawFd) -> io::Result<bool> {
+    Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE)? != 0)
+}
+
+/// `SO_LINGER` -- unlike every other option in this module, the option
+/// value is a `struct linger { l_onoff, l_linger }`, not a plain
+/// `c_int`, so this bypasses `setsockopt_int`/`getsockopt_int` (the same
+/// way [`set_bind_device`]/[`bind_device`] do for their own
+/// non-`c_int`-shaped option) and builds/reads that struct directly.
+/// `None` disables lingering (`l_onoff = 0`, the default); `Some(d)`
+/// enables it with `d`'s whole-second count as the linger timeout
+/// (`SO_LINGER`'s own granularity -- any sub-second remainder is
+/// truncated, not rounded).
+pub(crate) fn set_linger(fd: RawFd, linger: Option<Duration>) -> io::Result<()> {
+    let value = libc::linger {
+        l_onoff: linger.is_some() as c_int,
+        l_linger: linger.map_or(0, |d| d.as_secs() as c_int),
+    };
+    // SAFETY: `&value` is a valid `libc::linger` the kernel only reads
+    // for the call's duration; `fd` is caller-owned.
+    cvt(unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&value as *const libc::linger).cast(),
+            mem::size_of::<libc::linger>() as socklen_t,
+        )
+    })?;
+    Ok(())
+}
+
+/// The reverse of [`set_linger`] -- `None` if lingering is currently
+/// disabled.
+pub(crate) fn linger(fd: RawFd) -> io::Result<Option<Duration>> {
+    let mut value = libc::linger {
+        l_onoff: 0,
+        l_linger: 0,
+    };
+    let mut len = mem::size_of::<libc::linger>() as socklen_t;
+    // SAFETY: `&mut value`/`&mut len` are valid, exclusively borrowed
+    // out-params the kernel fills; `fd` is caller-owned.
+    cvt(unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&mut value as *mut libc::linger).cast(),
+            &mut len,
+        )
+    })?;
+    Ok((value.l_onoff != 0).then(|| Duration::from_secs(value.l_linger as u64)))
+}
+
+/// `TCP_QUICKACK` -- Linux/Android only, no BSD/macOS equivalent.
+/// Disabling it (the default is enabled) makes the kernel batch ACKs
+/// the way it already does for most other TCP implementations, instead
+/// of acknowledging data immediately; a one-shot setting that some
+/// kernels reset after the next incoming/outgoing segment, not a
+/// persistent socket-lifetime option the way the others here are.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn set_quickack(fd: RawFd, quickack: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, quickack as c_int)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn quickack(fd: RawFd) -> io::Result<bool> {
+    Ok(getsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK)? != 0)
+}
+
+/// `TCP_NODELAY` -- rustils' own `TcpStream`/`TcpListener` traits expose
+/// a setter (used by [`super::super::tcp::TcpStream::set_nodelay`]) but
+/// no getter, and nothing at all for `TcpSocket` (a bare `OwnedIo`, not
+/// a `PlatformTcpStream`, so it has no rustils trait method to call in
+/// the first place) -- both hand-rolled here the same way this module's
+/// other options are.
+pub(crate) fn set_nodelay(fd: RawFd, nodelay: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, nodelay as c_int)
+}
+
+pub(crate) fn nodelay(fd: RawFd) -> io::Result<bool> {
+    Ok(getsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY)? != 0)
+}
+
+pub(crate) fn set_ttl(fd: RawFd, ttl: u32) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL, ttl as c_int)
+}
+
+pub(crate) fn ttl(fd: RawFd) -> io::Result<u32> {
+    Ok(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL)? as u32)
+}
+
+/// `IP_TOS` -- the IPv4 type-of-service byte outgoing packets are sent
+/// with (DSCP/ECN bits). `u32` rather than `u8` to match this crate's
+/// other numeric options, even though only the low 8 bits are ever
+/// meaningful.
+pub(crate) fn set_tos_v4(fd: RawFd, tos: u32) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TOS, tos as c_int)
+}
+
+pub(crate) fn tos_v4(fd: RawFd) -> io::Result<u32> {
+    Ok(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TOS)? as u32)
+}
+
+/// The IPv6 equivalent of [`set_tos_v4`]/[`tos_v4`] (`IPV6_TCLASS`).
+pub(crate) fn set_tclass_v6(fd: RawFd, tclass: u32) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, tclass as c_int)
+}
+
+pub(crate) fn tclass_v6(fd: RawFd) -> io::Result<u32> {
+    Ok(getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS)? as u32)
 }
 
 /// Flips `fd`'s `O_NONBLOCK` flag via `fcntl(2)` -- unlike every socket
