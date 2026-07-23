@@ -19,10 +19,12 @@
 mod blocking;
 mod context;
 mod current_thread;
+mod id;
 mod metrics;
 mod worker;
 
 pub use context::{EnterGuard, Handle, TryCurrentError};
+pub use id::Id;
 pub use metrics::RuntimeMetrics;
 
 use crate::io::reactor::Reactor;
@@ -176,6 +178,10 @@ pub(crate) struct Shared {
     /// incoherent if other worker threads could be concurrently relying
     /// on real timing.
     is_current_thread: bool,
+    /// See [`Builder::name`].
+    name: Option<String>,
+    /// This runtime's opaque identity -- see [`Id`]/[`Handle::id`].
+    pub(crate) id: Id,
 }
 
 impl Shared {
@@ -374,6 +380,20 @@ enum Flavor {
     CurrentThread,
 }
 
+/// Which scheduling flavor a [`Runtime`] was built with -- see
+/// [`Builder::new_current_thread`]/[`Builder::new_multi_thread`],
+/// returned by [`Handle::runtime_flavor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeFlavor {
+    /// Executes all tasks on the current thread -- see
+    /// [`Builder::new_current_thread`].
+    CurrentThread,
+    /// Executes tasks across a pool of worker threads -- see
+    /// [`Builder::new_multi_thread`].
+    MultiThread,
+}
+
 /// Configures and builds a [`Runtime`].
 pub struct Builder {
     flavor: Flavor,
@@ -381,6 +401,7 @@ pub struct Builder {
     max_blocking_threads: usize,
     thread_config: ThreadConfig,
     thread_keep_alive: Duration,
+    name: Option<String>,
 }
 
 impl Builder {
@@ -396,6 +417,7 @@ impl Builder {
                 stack_size: None,
             },
             thread_keep_alive: Duration::from_secs(10),
+            name: None,
         }
     }
 
@@ -424,6 +446,7 @@ impl Builder {
                 stack_size: None,
             },
             thread_keep_alive: Duration::from_secs(10),
+            name: None,
         }
     }
 
@@ -451,6 +474,20 @@ impl Builder {
     pub fn max_blocking_threads(mut self, n: usize) -> Self {
         assert!(n > 0, "a runtime needs at least one blocking thread");
         self.max_blocking_threads = n;
+        self
+    }
+
+    /// Sets this runtime's own name, queryable via [`Handle::name`] --
+    /// distinct from [`thread_name`](Self::thread_name), which names the
+    /// OS threads the runtime spawns rather than the runtime itself, and
+    /// defaults to `None` unless this is called.
+    ///
+    /// # Panics
+    /// Panics if `name` is empty.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        assert!(!name.trim().is_empty(), "runtime name shouldn't be empty");
+        self.name = Some(name);
         self
     }
 
@@ -574,6 +611,8 @@ impl Builder {
             blocking_pool,
             thread_config: self.thread_config,
             is_current_thread,
+            name: self.name,
+            id: Id::next(),
         });
 
         let workers = local_workers.map(|local_workers| {
