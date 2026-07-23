@@ -79,6 +79,68 @@ fn a_panicking_task_reports_a_join_error_without_killing_the_runtime() {
 }
 
 #[test]
+fn join_error_into_panic_returns_the_original_payload() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let handle = rusty_tokio::spawn(async {
+            panic!("original payload");
+        });
+        let err = handle.await.unwrap_err();
+        let payload = err.into_panic();
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .expect("panic payload was not a string");
+        assert_eq!(message, "original payload");
+    });
+}
+
+#[test]
+fn join_error_try_into_panic_succeeds_for_an_actual_panic() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let handle = rusty_tokio::spawn(async {
+            panic!("boom");
+        });
+        let err = handle.await.unwrap_err();
+        assert!(err.try_into_panic().is_ok());
+    });
+}
+
+#[test]
+fn join_error_try_into_panic_hands_the_error_back_for_a_cancellation() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let handle = rusty_tokio::spawn(async {
+            rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        handle.abort();
+        let err = handle.await.unwrap_err();
+        assert!(err.is_cancelled());
+
+        let err = err.try_into_panic().unwrap_err();
+        assert!(err.is_cancelled());
+    });
+}
+
+#[test]
+#[should_panic(expected = "into_panic")]
+fn join_error_into_panic_panics_for_a_cancellation() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let handle = rusty_tokio::spawn(async {
+            rusty_tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        handle.abort();
+        let err = handle.await.unwrap_err();
+        let _ = err.into_panic();
+    });
+}
+
+#[test]
 fn yield_now_actually_gets_the_task_repolled() {
     // A broken yield_now (one that never actually re-wakes the task)
     // would just hang here forever -- the point of this test is that
