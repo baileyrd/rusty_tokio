@@ -306,6 +306,31 @@ impl TcpStream {
         .await
     }
 
+    /// Like [`read`](Self::read), but the returned bytes stay in the
+    /// socket's receive queue -- a later `read`/`peek` call sees them
+    /// again from the start.
+    pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        ready_io(&self.io, ReactorInterest::Read, || {
+            socket::peek(self.inner.as_raw_io(), buf)
+        })
+        .await
+    }
+
+    /// Non-`async fn` form of [`peek`](Self::peek).
+    pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
+            socket::peek(self.inner.as_raw_io(), buf)
+        })
+    }
+
+    /// Peeks without waiting, failing immediately (with `WouldBlock`)
+    /// if nothing's available yet.
+    pub fn try_peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_io(Interest::READABLE, || {
+            socket::peek(self.inner.as_raw_io(), buf)
+        })
+    }
+
     pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
         ready_io(&self.io, ReactorInterest::Write, || {
             socket::write(self.inner.as_raw_io(), buf)

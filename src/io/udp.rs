@@ -77,6 +77,57 @@ impl UdpSocket {
         })
     }
 
+    /// Like [`recv_from`](Self::recv_from), but the returned datagram
+    /// stays in the socket's receive queue -- a later `recv`/`recv_from`/
+    /// `peek_from` call sees it again from the start. Bypasses rustils'
+    /// own `recv_from` entirely (it has no peek variant), going straight
+    /// to `recvfrom(2)`/`recvfrom` with `MSG_PEEK` on the raw socket --
+    /// see `socket::peek_from`'s own docs.
+    pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        std::future::poll_fn(|cx| self.poll_peek_from(cx, buf)).await
+    }
+
+    /// Non-`async fn` form of [`peek_from`](Self::peek_from).
+    pub fn poll_peek_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
+            socket::peek_from(self.inner.as_raw_io(), buf)
+        })
+    }
+
+    /// Peeks without waiting, failing immediately (with `WouldBlock`)
+    /// if no datagram is available yet.
+    pub fn try_peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.try_io(Interest::READABLE, || {
+            socket::peek_from(self.inner.as_raw_io(), buf)
+        })
+    }
+
+    /// Like [`peek_from`](Self::peek_from), but only the next
+    /// datagram's sender matters -- doesn't dequeue it (or need a
+    /// buffer to receive its data into at all).
+    pub async fn peek_sender(&self) -> io::Result<SocketAddr> {
+        std::future::poll_fn(|cx| self.poll_peek_sender(cx)).await
+    }
+
+    /// Non-`async fn` form of [`peek_sender`](Self::peek_sender).
+    pub fn poll_peek_sender(&self, cx: &mut Context<'_>) -> Poll<io::Result<SocketAddr>> {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
+            socket::peek_sender(self.inner.as_raw_io())
+        })
+    }
+
+    /// Peeks the next datagram's sender without waiting, failing
+    /// immediately (with `WouldBlock`) if none is available yet.
+    pub fn try_peek_sender(&self) -> io::Result<SocketAddr> {
+        self.try_io(Interest::READABLE, || {
+            socket::peek_sender(self.inner.as_raw_io())
+        })
+    }
+
     /// Fixes `addr` as this socket's peer, so [`send`](Self::send)/
     /// [`recv`](Self::recv) can omit it on every call afterward. Unlike
     /// TCP's `connect`, this is a local, synchronous operation -- UDP's

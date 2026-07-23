@@ -41,7 +41,7 @@ use super::from_platform_err;
 use libc::{c_int, sockaddr, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t};
 use std::io;
 use std::mem;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -113,6 +113,46 @@ fn to_sockaddr(addr: SocketAddr) -> (sockaddr_storage, socklen_t) {
         }
     };
     (storage, len as socklen_t)
+}
+
+/// The reverse of [`to_sockaddr`] -- needed only for `peek_from`/
+/// `peek_sender` below, which bypass rustils' own `recv_from` (and thus
+/// its typed `SocketAddr` result) to reach `recvfrom(2)`'s `MSG_PEEK`
+/// flag directly. Every other address-producing call in this crate
+/// (`accept`, `local_addr`, `peer_addr`, plain `recv_from`) still goes
+/// through rustils' own decoding.
+///
+/// # Safety
+/// `storage.ss_family` must match the variant the kernel actually wrote
+/// (always true right after a `recvfrom(2)` call that succeeded).
+unsafe fn from_sockaddr(storage: &sockaddr_storage) -> io::Result<SocketAddr> {
+    match storage.ss_family as c_int {
+        libc::AF_INET => {
+            // SAFETY: `storage.ss_family == AF_INET`, the caller's
+            // contract for this whole function.
+            let sin = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in>() };
+            let port = u16::from_be(sin.sin_port);
+            let ip = Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes());
+            Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+        }
+        libc::AF_INET6 => {
+            // SAFETY: `storage.ss_family == AF_INET6`, the caller's
+            // contract for this whole function.
+            let sin6 = unsafe { &*(storage as *const sockaddr_storage).cast::<sockaddr_in6>() };
+            let port = u16::from_be(sin6.sin6_port);
+            let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            Ok(SocketAddr::V6(SocketAddrV6::new(
+                ip,
+                port,
+                sin6.sin6_flowinfo,
+                sin6.sin6_scope_id,
+            )))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kernel returned an address family other than AF_INET/AF_INET6",
+        )),
+    }
 }
 
 /// A bare, non-blocking socket -- not yet bound or connected. Nothing in
@@ -363,6 +403,57 @@ pub(crate) fn write(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     } else {
         Ok(n as usize)
     }
+}
+
+/// Like [`read`], but via `recv(2)` with `MSG_PEEK` -- the bytes stay in
+/// the socket's receive queue for the next real `read`/`recv` call.
+pub(crate) fn peek(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is valid for `buf.len()` bytes for the call's
+    // duration; `fd` is caller-owned and open.
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_PEEK) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// The UDP `recvfrom(2)`-with-`MSG_PEEK` counterpart of [`peek`] --
+/// reports the next datagram's length and sender without dequeuing it,
+/// via `recvfrom(2)` directly rather than rustils' own `recv_from`
+/// (which has no peek variant at all).
+pub(crate) fn peek_from(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    // SAFETY: an all-zero `sockaddr_storage` is a valid (if inert) value.
+    let mut storage: sockaddr_storage = unsafe { mem::zeroed() };
+    let mut fromlen = mem::size_of::<sockaddr_storage>() as socklen_t;
+    // SAFETY: `buf` is valid for `buf.len()` bytes for the call's
+    // duration; `&mut storage`/`&mut fromlen` are valid, exclusively
+    // borrowed out-params; `fd` is caller-owned and open.
+    let n = unsafe {
+        libc::recvfrom(
+            fd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::MSG_PEEK,
+            (&mut storage as *mut sockaddr_storage).cast::<sockaddr>(),
+            &mut fromlen,
+        )
+    };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just filled `storage` in via the call above.
+    let peer = unsafe { from_sockaddr(&storage) }?;
+    Ok((n as usize, peer))
+}
+
+/// Like [`peek_from`], but only the sender's address matters -- a
+/// zero-length peek still reports the next datagram's source (UDP
+/// datagram boundaries are preserved regardless of how much of it is
+/// actually read), without needing any buffer to receive data into.
+pub(crate) fn peek_sender(fd: RawFd) -> io::Result<SocketAddr> {
+    let (_n, addr) = peek_from(fd, &mut [])?;
+    Ok(addr)
 }
 
 /// `shutdown(2)` with `SHUT_WR` -- backs `AsyncWrite::poll_shutdown`,
