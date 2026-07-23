@@ -274,6 +274,29 @@ impl JoinError {
     pub fn is_panic(&self) -> bool {
         self.panicked.is_some()
     }
+
+    /// Consumes this error, returning the wrapped panic payload -- the
+    /// same value [`std::panic::catch_unwind`] would have returned,
+    /// suitable for re-raising via
+    /// [`std::panic::resume_unwind`] if the caller wants the original
+    /// panic to keep propagating instead of being reported as an
+    /// ordinary `JoinError`.
+    ///
+    /// # Panics
+    /// Panics if this error is [`is_cancelled`](Self::is_cancelled)
+    /// rather than [`is_panic`](Self::is_panic) -- there's no payload to
+    /// return for a task that was aborted rather than panicking.
+    pub fn into_panic(self) -> Box<dyn Any + Send + 'static> {
+        self.try_into_panic()
+            .expect("`into_panic` called on a JoinError that was cancelled, not a panic")
+    }
+
+    /// Like [`into_panic`](Self::into_panic), but returns `self` back
+    /// (rather than panicking) if this error doesn't actually wrap a
+    /// panic.
+    pub fn try_into_panic(self) -> Result<Box<dyn Any + Send + 'static>, Self> {
+        self.panicked.ok_or(JoinError { panicked: None })
+    }
 }
 
 impl fmt::Debug for JoinError {
