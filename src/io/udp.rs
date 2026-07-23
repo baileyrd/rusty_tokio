@@ -1,9 +1,13 @@
-use super::reactor::{ready_io, AsRawIo, Interest, OwnedIo, Reactor, ScheduledIo, TryCloneIo};
+use super::reactor::{
+    poll_io, AsRawIo, Interest as ReactorInterest, OwnedIo, Reactor, ScheduledIo, TryCloneIo,
+};
 use super::socket::{self, from_platform_err};
+use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
 // (`platform_linux` on Linux, `platform_macos` on macOS), identical
@@ -43,17 +47,34 @@ impl UdpSocket {
     }
 
     pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Write, || {
-            self.inner.send_to(buf, addr).map_err(from_platform_err)
-        })
-        .await
+        std::future::poll_fn(|cx| self.poll_send_to(cx, buf, addr)).await
     }
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        ready_io(&self.io, Interest::Read, || {
+        std::future::poll_fn(|cx| self.poll_recv_from(cx, buf)).await
+    }
+
+    /// Non-`async fn` form of [`send_to`](Self::send_to).
+    pub fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        addr: SocketAddr,
+    ) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, ReactorInterest::Write, cx, || {
+            self.inner.send_to(buf, addr).map_err(from_platform_err)
+        })
+    }
+
+    /// Non-`async fn` form of [`recv_from`](Self::recv_from).
+    pub fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
             self.inner.recv_from(buf).map_err(from_platform_err)
         })
-        .await
     }
 
     /// Fixes `addr` as this socket's peer, so [`send`](Self::send)/
@@ -72,20 +93,77 @@ impl UdpSocket {
 
     /// Sends to whichever peer [`connect`](Self::connect) fixed.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Write, || {
-            socket::write(self.inner.as_raw_io(), buf)
-        })
-        .await
+        std::future::poll_fn(|cx| self.poll_send(cx, buf)).await
     }
 
     /// Receives from whichever peer [`connect`](Self::connect) fixed --
     /// datagrams from anyone else are not delivered to a connected UDP
     /// socket.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Read, || {
+        std::future::poll_fn(|cx| self.poll_recv(cx, buf)).await
+    }
+
+    /// Non-`async fn` form of [`send`](Self::send).
+    pub fn poll_send(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, ReactorInterest::Write, cx, || {
+            socket::write(self.inner.as_raw_io(), buf)
+        })
+    }
+
+    /// Non-`async fn` form of [`recv`](Self::recv).
+    pub fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
             socket::read(self.inner.as_raw_io(), buf)
         })
-        .await
+    }
+
+    /// Waits for this socket to become readable -- see
+    /// [`ready`](Self::ready) for using this together with your own
+    /// non-blocking I/O via [`try_io`](Self::try_io).
+    pub async fn readable(&self) -> io::Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    pub async fn writable(&self) -> io::Result<()> {
+        self.ready(Interest::WRITABLE).await.map(|_| ())
+    }
+
+    /// Resolves once *any* of `interest`'s requested directions is
+    /// ready, reporting exactly which one(s) actually are.
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        std::future::poll_fn(|cx| self.poll_ready(interest, cx)).await
+    }
+
+    /// Non-`async fn` form of [`ready`](Self::ready).
+    pub fn poll_ready(&self, interest: Interest, cx: &mut Context<'_>) -> Poll<io::Result<Ready>> {
+        readiness::poll_ready(&self.io, interest, cx)
+    }
+
+    /// Non-`async fn` form of [`readable`](Self::readable) -- also the
+    /// method [`recv`](Self::recv)/[`recv_from`](Self::recv_from) wait
+    /// on internally, exposed directly for a caller doing its own
+    /// non-blocking `recv`/`recv_from` via [`try_io`](Self::try_io).
+    pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Read, cx).map(Ok)
+    }
+
+    /// Non-`async fn` form of [`writable`](Self::writable) -- the send
+    /// side's equivalent of [`poll_recv_ready`](Self::poll_recv_ready).
+    pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Write, cx).map(Ok)
+    }
+
+    /// Runs `f` (the caller's own non-blocking send/recv against this
+    /// socket's fd) once `interest` is ready, clearing that cached
+    /// readiness if `f` reports `WouldBlock` -- see
+    /// [`TcpStream::try_io`](super::TcpStream::try_io) for the same
+    /// pattern, identical reasoning here.
+    pub fn try_io<R>(
+        &self,
+        interest: Interest,
+        f: impl FnOnce() -> io::Result<R>,
+    ) -> io::Result<R> {
+        readiness::try_io(&self.io, interest, f)
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
