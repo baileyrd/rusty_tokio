@@ -1177,6 +1177,91 @@ fn notify_permit_is_banked_for_an_early_notify() {
 }
 
 #[test]
+fn notified_owned_works_across_an_arc_clone_in_a_spawned_task() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Arc::new(Notify::new());
+        let waiter = rusty_tokio::spawn({
+            let notify = notify.clone();
+            async move {
+                notify.notified_owned().await;
+            }
+        });
+
+        // Give the spawned task a chance to actually start waiting.
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        notify.notify_one();
+
+        rusty_tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("notify_one should wake the owned waiter")
+            .unwrap();
+    });
+}
+
+#[test]
+fn enable_closes_the_race_between_checking_a_condition_and_awaiting() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Notify::new();
+        let notified = notify.notified();
+        let mut notified = rusty_tokio::pin!(notified);
+
+        // Registers interest *before* anything is actually polling --
+        // a `notify_one` that fires right here, with nothing parked
+        // yet, must still be seen by the later `.await` below.
+        assert!(!notified.as_mut().enable());
+        notify.notify_one();
+
+        rusty_tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .expect(
+                "a notification that fired after enable() but before awaiting must not be lost",
+            );
+    });
+}
+
+#[test]
+fn owned_notified_enable_also_closes_the_race() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Arc::new(Notify::new());
+        let notified = notify.notified_owned();
+        let mut notified = rusty_tokio::pin!(notified);
+
+        assert!(!notified.as_mut().enable());
+        notify.notify_one();
+
+        rusty_tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .expect(
+                "a notification that fired after enable() but before awaiting must not be lost",
+            );
+    });
+}
+
+#[test]
+fn enable_reports_already_notified_when_a_permit_was_already_banked() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let notify = Notify::new();
+        notify.notify_one(); // banks a permit -- nobody waiting yet
+
+        let notified = notify.notified();
+        let mut notified = rusty_tokio::pin!(notified);
+        assert!(
+            notified.as_mut().enable(),
+            "enable() should immediately claim the already-banked permit"
+        );
+
+        // Already resolved -- must not block at all.
+        rusty_tokio::time::timeout(Duration::from_millis(50), notified)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn notify_waiters_wakes_and_resolves_every_current_waiter() {
     // Regression test: a naive `notify_waiters` that wakes a waiter's
     // stored `Waker` without also leaving it something to see on the
