@@ -146,3 +146,87 @@ fn advance_drives_an_interval_through_several_ticks_deterministically() {
         assert_eq!(fourth, first + Duration::from_secs(15));
     });
 }
+
+#[test]
+fn interval_period_reports_the_configured_period() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        let interval = time::interval(Duration::from_secs(5));
+        assert_eq!(interval.period(), Duration::from_secs(5));
+    });
+}
+
+#[test]
+fn interval_reset_reschedules_one_period_from_now() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut interval = time::interval(Duration::from_secs(5));
+        time::advance(Duration::from_secs(5)).await;
+        let first = interval.tick().await;
+
+        // Let some of the *next* scheduled period elapse, then reset --
+        // the next tick should measure a fresh period from the reset
+        // point, not from `first`'s original schedule.
+        time::advance(Duration::from_secs(2)).await;
+        interval.reset();
+        time::advance(Duration::from_secs(5)).await;
+        let second = interval.tick().await;
+
+        assert_eq!(second, first + Duration::from_secs(7));
+    });
+}
+
+#[test]
+fn interval_reset_immediately_fires_the_next_tick_right_away() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut interval = time::interval(Duration::from_secs(5));
+        time::advance(Duration::from_secs(5)).await;
+        let first = interval.tick().await;
+
+        time::advance(Duration::from_secs(1)).await;
+        interval.reset_immediately();
+        let second = interval.tick().await;
+        assert_eq!(second, first + Duration::from_secs(1));
+    });
+}
+
+#[test]
+fn interval_reset_after_reschedules_from_now_by_the_given_duration() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut interval = time::interval(Duration::from_secs(5));
+        time::advance(Duration::from_secs(5)).await;
+        let first = interval.tick().await;
+
+        time::advance(Duration::from_secs(1)).await;
+        interval.reset_after(Duration::from_secs(3));
+        time::advance(Duration::from_secs(3)).await;
+        let second = interval.tick().await;
+        assert_eq!(second, first + Duration::from_secs(4));
+    });
+}
+
+#[test]
+fn interval_reset_at_reschedules_to_the_given_absolute_deadline() {
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async {
+        time::pause();
+        let mut interval = time::interval(Duration::from_secs(5));
+        time::advance(Duration::from_secs(5)).await;
+        let first = interval.tick().await;
+
+        // Derived from `first` (the crate's own clock) rather than a
+        // fresh `std::time::Instant::now()` -- while paused, the crate's
+        // virtual clock only moves via `advance`, so reading real wall
+        // time here would drift from it.
+        let deadline = first + Duration::from_secs(10);
+        interval.reset_at(deadline);
+        time::advance(Duration::from_secs(10)).await;
+        let second = interval.tick().await;
+        assert_eq!(second, deadline);
+    });
+}
