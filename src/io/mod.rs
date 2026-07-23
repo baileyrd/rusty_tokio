@@ -47,6 +47,7 @@ mod udp;
 mod unix;
 #[cfg(unix)]
 mod unix_datagram;
+mod util;
 
 #[cfg(unix)]
 pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
@@ -71,3 +72,4 @@ pub use unix::{
 };
 #[cfg(unix)]
 pub use unix_datagram::UnixDatagram;
+pub use util::{empty, repeat, sink, Empty, Repeat, Sink};
