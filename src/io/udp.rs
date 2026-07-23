@@ -319,23 +319,29 @@ impl UdpSocket {
     }
 
     /// Runs `f` against a temporary, non-owning `std::net::UdpSocket`
-    /// wrapping this socket's raw fd -- `std::net::UdpSocket` already has
-    /// safe wrappers for every multicast/broadcast `setsockopt` this
-    /// crate wants (`join_multicast_v4`, `set_broadcast`, etc.), so
-    /// there's no need to hand-roll the raw `IP_ADD_MEMBERSHIP`/
-    /// `SO_BROADCAST`/etc. plumbing a second time the way
-    /// [`bind_device`](Self::bind_device) has to for an option `std`
-    /// doesn't cover. `mem::forget`ing the temporary afterward is what
-    /// makes this non-owning: without it, the temporary's own `Drop`
-    /// would close the fd out from under `self.inner`, which still
-    /// thinks it owns it.
-    #[cfg(unix)]
+    /// wrapping this socket's raw fd/socket -- `std::net::UdpSocket`
+    /// already has safe wrappers for every multicast/broadcast
+    /// `setsockopt` this crate wants (`join_multicast_v4`,
+    /// `set_broadcast`, etc.), so there's no need to hand-roll the raw
+    /// `IP_ADD_MEMBERSHIP`/`SO_BROADCAST`/etc. plumbing a second time
+    /// the way [`bind_device`](Self::bind_device) has to for an option
+    /// `std` doesn't cover. `mem::forget`ing the temporary afterward is
+    /// what makes this non-owning: without it, the temporary's own
+    /// `Drop` would close the fd/socket out from under `self.inner`,
+    /// which still thinks it owns it.
     fn with_std<R>(&self, f: impl FnOnce(&std::net::UdpSocket) -> R) -> R {
+        #[cfg(unix)]
         use std::os::fd::FromRawFd;
-        // SAFETY: `as_raw_io()` is a valid, currently-open fd owned by
-        // `self.inner`; `mem::forget` below stops this temporary
-        // `std::net::UdpSocket` from double-closing it on drop.
+        #[cfg(windows)]
+        use std::os::windows::io::FromRawSocket;
+        // SAFETY: `as_raw_io()` is a valid, currently-open fd/socket
+        // owned by `self.inner`; `mem::forget` below stops this
+        // temporary `std::net::UdpSocket` from double-closing it on
+        // drop.
+        #[cfg(unix)]
         let borrowed = unsafe { std::net::UdpSocket::from_raw_fd(self.inner.as_raw_io()) };
+        #[cfg(windows)]
+        let borrowed = unsafe { std::net::UdpSocket::from_raw_socket(self.inner.as_raw_io()) };
         let result = f(&borrowed);
         std::mem::forget(borrowed);
         result
@@ -410,6 +416,18 @@ impl UdpSocket {
     #[cfg(unix)]
     pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
         self.with_std(|s| s.multicast_ttl_v4())
+    }
+
+    /// `SO_BROADCAST` -- whether this socket may send to the broadcast
+    /// address (`255.255.255.255`, or a subnet's own broadcast
+    /// address). See `std::net::UdpSocket::set_broadcast`.
+    pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
+        self.with_std(|s| s.set_broadcast(on))
+    }
+
+    /// The reverse of [`set_broadcast`](Self::set_broadcast).
+    pub fn broadcast(&self) -> io::Result<bool> {
+        self.with_std(|s| s.broadcast())
     }
 
     /// Adopts an already-bound `std` socket -- e.g. one received from a
