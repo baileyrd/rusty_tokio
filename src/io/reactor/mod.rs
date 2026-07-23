@@ -218,6 +218,31 @@ pub(crate) fn poll_io<T>(
     }
 }
 
+/// Waits for `interest` readiness on `io`, without attempting any
+/// operation itself -- the building block behind [`super::AsyncFd`]'s
+/// `readable`/`writable`, which hand the actual I/O back to the caller
+/// via `try_io` instead of performing it internally the way [`poll_io`]
+/// does. Unix-only, matching `AsyncFd`'s own gating -- nothing else in
+/// this module calls these two.
+#[cfg(unix)]
+pub(crate) fn poll_ready(
+    io: &std::sync::Arc<ScheduledIo>,
+    interest: Interest,
+    cx: &mut Context<'_>,
+) -> Poll<()> {
+    io.poll_ready(cx, interest)
+}
+
+/// Clears `io`'s cached `interest` readiness -- called after a
+/// `WouldBlock` proves the previous "ready" signal was stale. The
+/// [`poll_io`]/[`ready_io`] loop above does this internally on every
+/// `WouldBlock`; [`super::AsyncFdReadyGuard::clear_ready`] exposes the
+/// same step for callers doing their own I/O outside this module.
+#[cfg(unix)]
+pub(crate) fn clear_ready(io: &std::sync::Arc<ScheduledIo>, interest: Interest) {
+    io.clear(interest)
+}
+
 /// Run `op` in a loop, waiting for `interest` readiness on `io` between
 /// attempts, until it succeeds or fails with something other than
 /// `WouldBlock`.

@@ -29,11 +29,14 @@
 //! `unix_datagram.rs` are POSIX-only, `#[cfg(unix)]`-gated below; `tcp.rs`/
 //! `udp.rs` instead gain a third, hand-rolled `socket::windows` arm.
 
+#[cfg(unix)]
+mod async_fd;
 mod async_io;
 mod buffered;
 #[cfg(feature = "futures-io-compat")]
 mod compat;
 mod duplex;
+mod interest;
 mod lookup;
 pub(crate) mod reactor;
 pub(crate) mod socket;
@@ -45,6 +48,8 @@ mod unix;
 #[cfg(unix)]
 mod unix_datagram;
 
+#[cfg(unix)]
+pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
 pub use async_io::{
     copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
     AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf,
@@ -53,6 +58,7 @@ pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
 pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
+pub use interest::{Interest, Ready};
 pub use lookup::{lookup_host, LookupHost};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{
