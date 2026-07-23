@@ -20,6 +20,7 @@
 //! reuses this same one-lock shape for the queue/`recv_waker` pair, just
 //! without a `send_waiters` list at all -- nothing ever waits to send.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,14 @@ use std::task::{Poll, Waker};
 struct Inner<T> {
     queue: VecDeque<T>,
     capacity: usize,
+    /// Slots claimed by an outstanding [`Permit`]/[`OwnedPermit`] (or
+    /// one not-yet-doled-out by a live [`PermitIterator`]) but not yet
+    /// filled with an actual value -- counted separately from
+    /// `queue.len()` so `reserve`'s "is there room" check sees them the
+    /// same way an already-queued item would (`queue.len() + reserved
+    /// < capacity`), without needing a placeholder value in `queue`
+    /// itself.
+    reserved: usize,
     send_waiters: VecDeque<Waker>,
     recv_waker: Option<Waker>,
     senders_alive: usize,
@@ -36,6 +45,44 @@ struct Inner<T> {
 
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
+}
+
+impl<T> Shared<T> {
+    /// Gives back one previously-reserved slot that's never going to be
+    /// filled after all (a [`Permit`]/[`OwnedPermit`] dropped without
+    /// sending, or a [`PermitIterator`] dropped with some of its permits
+    /// never handed out) -- wakes up to `n` queued senders, since that
+    /// many could now have room where they didn't before.
+    fn release_reserved(&self, n: usize) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.reserved -= n;
+        let mut woken = Vec::new();
+        for _ in 0..n {
+            match guard.send_waiters.pop_front() {
+                Some(waker) => woken.push(waker),
+                None => break,
+            }
+        }
+        drop(guard);
+        for waker in woken {
+            waker.wake();
+        }
+    }
+
+    /// Converts one previously-reserved slot into an actual queued
+    /// value ([`Permit::send`]/[`OwnedPermit::send`]) -- total capacity
+    /// used doesn't change, so (unlike [`release_reserved`](Self::release_reserved))
+    /// this wakes the *receiver*, not another sender.
+    fn fill_reserved(&self, value: T) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.reserved -= 1;
+        guard.queue.push_back(value);
+        let waker = guard.recv_waker.take();
+        drop(guard);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 pub struct Sender<T> {
@@ -52,6 +99,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         inner: Mutex::new(Inner {
             queue: VecDeque::new(),
             capacity,
+            reserved: 0,
             send_waiters: VecDeque::new(),
             recv_waker: None,
             senders_alive: 1,
@@ -74,7 +122,7 @@ impl<T> Sender<T> {
             if !guard.receiver_alive {
                 return Poll::Ready(false);
             }
-            if guard.queue.len() < guard.capacity {
+            if guard.queue.len() + guard.reserved < guard.capacity {
                 guard
                     .queue
                     .push_back(value.take().expect("polled after completion"));
@@ -97,6 +145,105 @@ impl<T> Sender<T> {
                 value.expect("value not consumed on failure path"),
             ))
         }
+    }
+
+    /// Waits for capacity, then reserves one slot without filling it
+    /// yet -- unlike [`send`](Self::send), the value to put there
+    /// doesn't need to exist yet at the time the wait for room happens.
+    /// Fill it (synchronously, since the slot's already reserved) via
+    /// [`Permit::send`].
+    pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        if reserved {
+            Ok(Permit {
+                sender: self,
+                used: Cell::new(false),
+            })
+        } else {
+            Err(SendError(()))
+        }
+    }
+
+    /// Like [`reserve`](Self::reserve), but reserves `n` slots at once,
+    /// handed back one at a time via the returned [`PermitIterator`].
+    pub async fn reserve_many(&self, n: usize) -> Result<PermitIterator<'_, T>, SendError<()>> {
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, n)).await;
+        if reserved {
+            Ok(PermitIterator {
+                sender: self,
+                remaining: n,
+            })
+        } else {
+            Err(SendError(()))
+        }
+    }
+
+    /// Like [`reserve`](Self::reserve), but the returned permit owns a
+    /// clone of this `Sender` instead of borrowing it -- usable past
+    /// this particular `Sender`'s own lifetime (e.g. moved into a
+    /// spawned task), at the cost of consuming this one to make it.
+    pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, SendError<()>> {
+        let reserved = std::future::poll_fn(|cx| self.poll_reserve(cx, 1)).await;
+        if reserved {
+            Ok(OwnedPermit { sender: Some(self) })
+        } else {
+            Err(SendError(()))
+        }
+    }
+
+    /// Reserves one slot without waiting, failing immediately if the
+    /// channel is either full or closed.
+    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if !guard.receiver_alive {
+            return Err(TrySendError::Closed(()));
+        }
+        if guard.queue.len() + guard.reserved < guard.capacity {
+            guard.reserved += 1;
+            Ok(Permit {
+                sender: self,
+                used: Cell::new(false),
+            })
+        } else {
+            Err(TrySendError::Full(()))
+        }
+    }
+
+    /// Like [`try_reserve`](Self::try_reserve), but owning -- and, since
+    /// it consumes `self`, hands `self` back inside the error on
+    /// failure rather than losing it.
+    pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if !guard.receiver_alive {
+            drop(guard);
+            return Err(TrySendError::Closed(self));
+        }
+        if guard.queue.len() + guard.reserved < guard.capacity {
+            guard.reserved += 1;
+            drop(guard);
+            Ok(OwnedPermit { sender: Some(self) })
+        } else {
+            drop(guard);
+            Err(TrySendError::Full(self))
+        }
+    }
+
+    /// Shared poll body for [`reserve`](Self::reserve)/
+    /// [`reserve_many`](Self::reserve_many)/[`reserve_owned`](Self::reserve_owned)
+    /// -- `Ready(true)` once `n` slots are reserved, `Ready(false)` if
+    /// the receiver's gone (no reservation made), `Pending` (queued
+    /// behind any other waiting sender) otherwise.
+    fn poll_reserve(&self, cx: &mut std::task::Context<'_>, n: usize) -> Poll<bool> {
+        let mut guard = self.shared.inner.lock().unwrap();
+        if !guard.receiver_alive {
+            return Poll::Ready(false);
+        }
+        if guard.queue.len() + guard.reserved + n <= guard.capacity {
+            guard.reserved += n;
+            return Poll::Ready(true);
+        }
+        guard.send_waiters.push_back(cx.waker().clone());
+        Poll::Pending
     }
 }
 
@@ -124,6 +271,162 @@ impl<T> Drop for Sender<T> {
         }
     }
 }
+
+/// A reserved (but not yet filled) slot in a bounded channel's buffer,
+/// obtained via [`Sender::reserve`]/[`Sender::reserve_many`]. Sending
+/// through it (via [`send`](Self::send)) is then synchronous and
+/// infallible -- the capacity wait already happened at reservation
+/// time -- and dropping it unused gives the slot back for someone else
+/// to reserve or send into.
+#[must_use = "a Permit does nothing unless `send` is called on it -- dropping it unused just releases the reservation"]
+pub struct Permit<'a, T> {
+    sender: &'a Sender<T>,
+    used: Cell<bool>,
+}
+
+impl<T> Permit<'_, T> {
+    /// Fills this reservation with `value`. Always succeeds and never
+    /// waits -- the capacity was already secured when this `Permit` was
+    /// obtained.
+    pub fn send(self, value: T) {
+        self.used.set(true);
+        self.sender.shared.fill_reserved(value);
+    }
+}
+
+impl<T> Drop for Permit<'_, T> {
+    fn drop(&mut self) {
+        if !self.used.get() {
+            self.sender.shared.release_reserved(1);
+        }
+    }
+}
+
+/// Like [`Permit`], but owns a clone of the `Sender` it came from
+/// instead of borrowing it -- obtained via
+/// [`Sender::reserve_owned`]/[`Sender::try_reserve_owned`].
+#[must_use = "an OwnedPermit does nothing unless `send` (or `release`) is called on it -- dropping it unused just releases the reservation"]
+pub struct OwnedPermit<T> {
+    // `None` only in between `send`/`release` taking it and the
+    // `OwnedPermit` itself actually finishing being dropped -- lets
+    // both of those hand the underlying `Sender` back by value without
+    // needing `unsafe`/`ManuallyDrop` to move out of a `Drop` type.
+    sender: Option<Sender<T>>,
+}
+
+impl<T> OwnedPermit<T> {
+    /// Fills this reservation with `value`, handing back the `Sender`
+    /// this permit was reserved from (unlike [`Permit::send`], which has
+    /// no owned `Sender` to give back).
+    pub fn send(mut self, value: T) -> Sender<T> {
+        let sender = self.sender.take().expect("OwnedPermit already consumed");
+        sender.shared.fill_reserved(value);
+        sender
+    }
+
+    /// Gives up this reservation without sending anything, handing back
+    /// the `Sender` -- equivalent to dropping the permit, except the
+    /// `Sender` isn't lost along with it.
+    pub fn release(mut self) -> Sender<T> {
+        let sender = self.sender.take().expect("OwnedPermit already consumed");
+        sender.shared.release_reserved(1);
+        sender
+    }
+}
+
+impl<T> Drop for OwnedPermit<T> {
+    fn drop(&mut self) {
+        if let Some(sender) = &self.sender {
+            sender.shared.release_reserved(1);
+        }
+    }
+}
+
+/// Hands out the `n` slots reserved by [`Sender::reserve_many`], one
+/// [`Permit`] at a time. Dropping this iterator before exhausting it
+/// releases whatever reservations were never handed out.
+pub struct PermitIterator<'a, T> {
+    sender: &'a Sender<T>,
+    remaining: usize,
+}
+
+impl<'a, T> Iterator for PermitIterator<'a, T> {
+    type Item = Permit<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(Permit {
+            sender: self.sender,
+            used: Cell::new(false),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for PermitIterator<'_, T> {}
+
+impl<T> Drop for PermitIterator<'_, T> {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.sender.shared.release_reserved(self.remaining);
+        }
+    }
+}
+
+/// Why [`Sender::try_reserve`]/[`Sender::try_reserve_owned`] failed to
+/// reserve a slot without waiting.
+pub enum TrySendError<T> {
+    /// No free capacity right now -- retry later, or use
+    /// [`Sender::reserve`]/[`Sender::reserve_many`] to wait for room.
+    Full(T),
+    /// The receiver has already been dropped, so no capacity will ever
+    /// free up again.
+    Closed(T),
+}
+
+impl<T> TrySendError<T> {
+    /// The value (or, for the owning variants, the `Sender`) that
+    /// couldn't be used to reserve a slot.
+    pub fn into_inner(self) -> T {
+        match self {
+            TrySendError::Full(t) | TrySendError::Closed(t) => t,
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        matches!(self, TrySendError::Full(_))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self, TrySendError::Closed(_))
+    }
+}
+
+impl<T> fmt::Debug for TrySendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrySendError::Full(_) => f.write_str("TrySendError::Full(..)"),
+            TrySendError::Closed(_) => f.write_str("TrySendError::Closed(..)"),
+        }
+    }
+}
+
+impl<T> fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrySendError::Full(_) => write!(f, "no available capacity"),
+            TrySendError::Closed(_) => write!(f, "channel closed"),
+        }
+    }
+}
+
+impl<T> std::error::Error for TrySendError<T> {}
 
 impl<T> Receiver<T> {
     pub async fn recv(&mut self) -> Option<T> {

@@ -784,6 +784,176 @@ fn mpsc_send_blocks_until_capacity_frees_up() {
 }
 
 #[test]
+fn reserve_then_send_delivers_the_value() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(4);
+        let permit = tx.reserve().await.unwrap();
+        permit.send(42);
+        assert_eq!(rx.recv().await, Some(42));
+    });
+}
+
+#[test]
+fn dropping_a_permit_unused_frees_its_slot_back_up() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel::<i32>(1);
+        let permit = tx.reserve().await.unwrap();
+        drop(permit);
+        // The dropped permit's slot must be free again -- a plain send
+        // should succeed without blocking.
+        tx.send(7).await.unwrap();
+        assert_eq!(rx.recv().await, Some(7));
+    });
+}
+
+#[test]
+fn reserve_blocks_until_capacity_frees_up() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1).await.unwrap();
+
+        let reserver = rusty_tokio::spawn(async move {
+            let permit = tx.reserve().await.unwrap();
+            permit.send(2);
+        });
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        reserver.await.unwrap();
+    });
+}
+
+#[test]
+fn reserve_fails_once_every_receiver_drops() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, rx) = mpsc::channel::<i32>(4);
+        drop(rx);
+        assert!(tx.reserve().await.is_err());
+    });
+}
+
+#[test]
+fn reserve_many_reserves_all_n_slots_up_front() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut permits = tx.reserve_many(3).await.unwrap();
+
+        // All 3 slots are reserved as soon as `reserve_many` resolves --
+        // a 4th, independent reservation only has room for the one slot
+        // still free (held here so it isn't immediately released again).
+        let fourth = tx.try_reserve().unwrap();
+        assert!(matches!(
+            tx.try_reserve(),
+            Err(rusty_tokio::sync::mpsc::TrySendError::Full(()))
+        ));
+        drop(fourth);
+
+        permits.next().unwrap().send(1);
+        permits.next().unwrap().send(2);
+        permits.next().unwrap().send(3);
+        assert!(permits.next().is_none());
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        assert_eq!(rx.recv().await, Some(3));
+    });
+}
+
+#[test]
+fn dropping_a_partially_consumed_permit_iterator_frees_the_rest() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut permits = tx.reserve_many(3).await.unwrap();
+        permits.next().unwrap().send(1);
+        // The other 2 reserved-but-unused permits are dropped here,
+        // along with the iterator itself.
+        drop(permits);
+
+        // Both slots the iterator was still holding must be free again.
+        tx.send(2).await.unwrap();
+        tx.send(3).await.unwrap();
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        assert_eq!(rx.recv().await, Some(3));
+    });
+}
+
+#[test]
+fn reserve_owned_moves_the_sender_into_the_permit_and_back_out_on_send() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(4);
+        let permit = tx.reserve_owned().await.unwrap();
+        let tx = permit.send(9);
+        tx.send(10).await.unwrap();
+
+        assert_eq!(rx.recv().await, Some(9));
+        assert_eq!(rx.recv().await, Some(10));
+    });
+}
+
+#[test]
+fn owned_permit_release_gives_the_sender_back_without_sending() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel::<i32>(1);
+        let permit = tx.reserve_owned().await.unwrap();
+        let tx = permit.release();
+
+        // The released slot is free again.
+        tx.send(5).await.unwrap();
+        assert_eq!(rx.recv().await, Some(5));
+    });
+}
+
+#[test]
+fn try_reserve_fails_full_without_waiting_then_succeeds_after_a_release() {
+    let (tx, mut rx) = mpsc::channel::<i32>(1);
+    let permit = tx.try_reserve().unwrap();
+    assert!(matches!(
+        tx.try_reserve(),
+        Err(rusty_tokio::sync::mpsc::TrySendError::Full(()))
+    ));
+    permit.send(1);
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(tx.try_reserve().is_ok());
+    });
+}
+
+#[test]
+fn try_reserve_fails_closed_once_the_receiver_drops() {
+    let (tx, rx) = mpsc::channel::<i32>(4);
+    drop(rx);
+    assert!(matches!(
+        tx.try_reserve(),
+        Err(rusty_tokio::sync::mpsc::TrySendError::Closed(()))
+    ));
+}
+
+#[test]
+fn try_reserve_owned_hands_the_sender_back_on_failure() {
+    let (tx, rx) = mpsc::channel::<i32>(4);
+    drop(rx);
+    match tx.try_reserve_owned() {
+        Err(rusty_tokio::sync::mpsc::TrySendError::Closed(returned_tx)) => {
+            // Got the exact same Sender back, not lost.
+            drop(returned_tx);
+        }
+        _ => panic!("expected TrySendError::Closed"),
+    }
+}
+
+#[test]
 fn unbounded_send_never_blocks_even_far_past_any_bounded_capacity() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
