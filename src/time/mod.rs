@@ -175,16 +175,34 @@ impl TimerDriver {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.inner.lock().unwrap();
         guard.heap.push(Reverse((deadline, id)));
-        guard.wakers.insert(id, waker);
+        guard.wakers.insert(id, waker.clone());
         drop(guard);
         // A newly registered deadline might be sooner than whatever the
         // timer thread is currently sleeping until.
         self.condvar.notify_one();
+        // `shutdown()` joins the background event-loop thread -- once
+        // that's happened, nothing is ever going to pop this entry back
+        // off the heap and fire it, so this registration would
+        // otherwise sit here forever with no way to ever wake its task.
+        // Waking immediately instead lets the caller's next poll of
+        // `Sleep`/`Interval` re-check its own deadline against
+        // `self.timer.now()` directly (already-due deadlines resolve
+        // right away; a still-future one re-registers and hits this
+        // same immediate-wake path again, a bounded busy-poll rather
+        // than a silent hang -- acceptable for the brief window a task
+        // might still be getting polled during runtime shutdown).
+        if self.shutdown.load(Ordering::Acquire) {
+            waker.wake();
+        }
         id
     }
 
     fn update_waker(&self, id: u64, waker: Waker) {
-        self.inner.lock().unwrap().wakers.insert(id, waker);
+        self.inner.lock().unwrap().wakers.insert(id, waker.clone());
+        // See `register`'s identical check for why.
+        if self.shutdown.load(Ordering::Acquire) {
+            waker.wake();
+        }
     }
 
     fn cancel(&self, id: u64) {
@@ -200,6 +218,63 @@ impl TimerDriver {
         if let Some(handle) = self.thread.lock().unwrap().take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::task::Wake;
+
+    struct FlagWaker(AtomicBool);
+
+    impl Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn register_after_shutdown_wakes_immediately_instead_of_hanging_forever() {
+        let driver = Arc::new(TimerDriver::new());
+        driver.start();
+        driver.shutdown();
+
+        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let waker = Waker::from(flag.clone());
+        let deadline = driver.now() + Duration::from_secs(3600);
+        driver.register(deadline, waker);
+
+        assert!(
+            flag.0.load(Ordering::SeqCst),
+            "a registration made after the background thread already exited must wake \
+             immediately -- nothing is ever coming back to fire it otherwise"
+        );
+    }
+
+    #[test]
+    fn update_waker_after_shutdown_wakes_immediately_instead_of_hanging_forever() {
+        let driver = Arc::new(TimerDriver::new());
+        driver.start();
+
+        let first_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let deadline = driver.now() + Duration::from_secs(3600);
+        let id = driver.register(deadline, Waker::from(first_flag));
+
+        driver.shutdown();
+
+        let second_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        driver.update_waker(id, Waker::from(second_flag.clone()));
+
+        assert!(
+            second_flag.0.load(Ordering::SeqCst),
+            "re-polling an already-registered Sleep after the driver shut down must wake \
+             immediately too, same as a fresh registration"
+        );
     }
 }
 
