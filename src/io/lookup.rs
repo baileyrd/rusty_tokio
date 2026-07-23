@@ -42,6 +42,17 @@ where
 /// The resolved [`SocketAddr`]s from a [`lookup_host`] call.
 pub struct LookupHost(vec::IntoIter<SocketAddr>);
 
+impl LookupHost {
+    /// A single already-known address, wrapped as if it had gone
+    /// through a real resolution -- backs [`super::ToSocketAddrs`]'s
+    /// fast path for a string that already parses directly as a
+    /// `SocketAddr`, skipping the [`crate::spawn_blocking`] round trip
+    /// `lookup_host` itself needs for a real hostname.
+    pub(crate) fn single(addr: SocketAddr) -> LookupHost {
+        LookupHost(vec![addr].into_iter())
+    }
+}
+
 impl Iterator for LookupHost {
     type Item = SocketAddr;
 
