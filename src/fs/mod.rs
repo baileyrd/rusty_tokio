@@ -506,3 +506,55 @@ impl AsyncSeek for File {
         }
     }
 }
+
+/// Creates a new, empty directory at `path`. See `std::fs::create_dir`
+/// -- fails if any parent component doesn't already exist; see
+/// [`create_dir_all`] for the recursive version.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::create_dir(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Recursively creates `path` and every missing parent directory. See
+/// `std::fs::create_dir_all` -- unlike [`create_dir`], succeeds
+/// (without doing anything further) if `path` already exists as a
+/// directory.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::create_dir_all(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Removes the empty directory at `path`. See `std::fs::remove_dir` --
+/// fails if `path` isn't empty; see [`remove_dir_all`] for the
+/// recursive version.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::remove_dir(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Recursively removes `path` and everything under it. See
+/// `std::fs::remove_dir_all`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::remove_dir_all(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}

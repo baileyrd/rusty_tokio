@@ -124,6 +124,80 @@ fn rewind_seeks_back_to_the_start() {
 }
 
 #[test]
+fn create_dir_makes_a_single_new_directory() {
+    let path = temp_path("create-dir");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::create_dir(&path).await.unwrap();
+        assert!(path.is_dir());
+    });
+    std::fs::remove_dir(&path).unwrap();
+}
+
+#[test]
+fn create_dir_fails_if_the_parent_is_missing() {
+    let parent = temp_path("create-dir-missing-parent");
+    let child = parent.join("child");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let err = rusty_tokio::fs::create_dir(&child).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    });
+}
+
+#[test]
+fn create_dir_all_makes_every_missing_parent() {
+    let root = temp_path("create-dir-all");
+    let nested = root.join("a").join("b").join("c");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::create_dir_all(&nested).await.unwrap();
+        assert!(nested.is_dir());
+
+        // Succeeds again without complaint, unlike `create_dir`.
+        rusty_tokio::fs::create_dir_all(&nested).await.unwrap();
+    });
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn remove_dir_removes_an_empty_directory() {
+    let path = temp_path("remove-dir");
+    std::fs::create_dir(&path).unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::remove_dir(&path).await.unwrap();
+    });
+    assert!(!path.exists());
+}
+
+#[test]
+fn remove_dir_fails_on_a_non_empty_directory() {
+    let path = temp_path("remove-dir-non-empty");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("file"), b"content").unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let err = rusty_tokio::fs::remove_dir(&path).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+    });
+    std::fs::remove_dir_all(&path).unwrap();
+}
+
+#[test]
+fn remove_dir_all_removes_a_directory_and_its_contents() {
+    let root = temp_path("remove-dir-all");
+    let nested = root.join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("file"), b"content").unwrap();
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::remove_dir_all(&root).await.unwrap();
+    });
+    assert!(!root.exists());
+}
+
+#[test]
 fn open_a_missing_file_reports_not_found() {
     let path = temp_path("does-not-exist");
     let rt = Runtime::new().unwrap();
