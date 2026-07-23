@@ -206,6 +206,37 @@ pub struct OwnedSemaphorePermit {
     permits: usize,
 }
 
+impl OwnedSemaphorePermit {
+    /// How many permits this one holds (e.g. from
+    /// [`acquire_many_owned`](Semaphore::acquire_many_owned)).
+    pub fn num_permits(&self) -> usize {
+        self.permits
+    }
+
+    /// The `Arc`-owned `Semaphore` this permit was acquired from.
+    pub fn semaphore(&self) -> &Arc<Semaphore> {
+        &self.semaphore
+    }
+
+    /// Merges `other`'s permits into `self`, so dropping `self`
+    /// afterward releases both at once -- `other` itself is consumed
+    /// without releasing anything on its own.
+    ///
+    /// # Panics
+    /// Panics if `other` was acquired from a different `Semaphore`.
+    pub fn merge(&mut self, other: Self) {
+        assert!(
+            Arc::ptr_eq(&self.semaphore, &other.semaphore),
+            "merge called with permits from different Semaphores"
+        );
+        self.permits += other.permits;
+        // Skip `other`'s own `Drop` -- it would release its permits
+        // back, which its count has instead just been folded into
+        // `self` to release later, together.
+        std::mem::forget(other);
+    }
+}
+
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
         Semaphore::release(&self.semaphore.state, self.permits);

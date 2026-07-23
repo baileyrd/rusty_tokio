@@ -514,6 +514,52 @@ fn semaphore_owned_permit_moves_into_a_spawned_task() {
 }
 
 #[test]
+fn owned_semaphore_permit_num_permits_and_semaphore_accessors() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let semaphore = Arc::new(Semaphore::new(5));
+        let permit = semaphore.clone().acquire_many_owned(3).await;
+        assert_eq!(permit.num_permits(), 3);
+        assert!(Arc::ptr_eq(permit.semaphore(), &semaphore));
+        assert_eq!(semaphore.available_permits(), 2);
+        drop(permit);
+        assert_eq!(semaphore.available_permits(), 5);
+    });
+}
+
+#[test]
+fn owned_semaphore_permit_merge_combines_permits_and_releases_both_together() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let semaphore = Arc::new(Semaphore::new(5));
+        let mut a = semaphore.clone().acquire_many_owned(2).await;
+        let b = semaphore.clone().acquire_many_owned(1).await;
+        assert_eq!(semaphore.available_permits(), 2);
+
+        a.merge(b);
+        assert_eq!(a.num_permits(), 3);
+        // Merging doesn't itself release anything.
+        assert_eq!(semaphore.available_permits(), 2);
+
+        drop(a);
+        assert_eq!(semaphore.available_permits(), 5);
+    });
+}
+
+#[test]
+#[should_panic(expected = "different Semaphores")]
+fn owned_semaphore_permit_merge_panics_across_different_semaphores() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let sem_a = Arc::new(Semaphore::new(2));
+        let sem_b = Arc::new(Semaphore::new(2));
+        let mut a = sem_a.acquire_owned().await;
+        let b = sem_b.acquire_owned().await;
+        a.merge(b);
+    });
+}
+
+#[test]
 fn watch_initial_value_is_observable_without_waiting() {
     let (_tx, rx) = rusty_tokio::sync::watch::channel(42);
     assert_eq!(*rx.borrow(), 42);
