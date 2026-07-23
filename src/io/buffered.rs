@@ -261,6 +261,85 @@ impl<W: AsyncBufRead + Unpin> AsyncBufRead for BufWriter<W> {
     }
 }
 
+/// A combined buffered reader and writer around a single stream that's
+/// both -- just [`BufWriter`] wrapped around a [`BufReader`], since both
+/// already exist and buffer their own direction independently. Useful
+/// for a protocol that reads and writes the same connection and wants
+/// both directions buffered without wrapping (and re-wrapping) the
+/// stream in two separate types by hand.
+pub struct BufStream<T> {
+    inner: BufWriter<BufReader<T>>,
+}
+
+impl<T> BufStream<T> {
+    pub fn new(stream: T) -> Self {
+        BufStream {
+            inner: BufWriter::new(BufReader::new(stream)),
+        }
+    }
+
+    /// Like [`new`](Self::new), but with independent initial capacities
+    /// for the read side and the write side.
+    pub fn with_capacity(reader_capacity: usize, writer_capacity: usize, stream: T) -> Self {
+        BufStream {
+            inner: BufWriter::with_capacity(
+                writer_capacity,
+                BufReader::with_capacity(reader_capacity, stream),
+            ),
+        }
+    }
+
+    pub fn get_ref(&self) -> &T {
+        self.inner.get_ref().get_ref()
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        self.inner.get_mut().get_mut()
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner.into_inner().into_inner()
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for BufStream<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncBufRead for BufStream<T> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        Pin::new(&mut self.get_mut().inner).poll_fill_buf(cx)
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        Pin::new(&mut self.get_mut().inner).consume(amt);
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for BufStream<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 /// Yields one line at a time from an [`AsyncBufRead`] -- see
 /// [`super::AsyncBufReadExt::lines`].
 pub struct Lines<R> {
