@@ -23,7 +23,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
 struct Inner<T> {
@@ -291,6 +291,17 @@ impl<T> Sender<T> {
     }
 }
 
+impl<T> Sender<T> {
+    /// A weak handle that doesn't keep the channel's sender count alive
+    /// by itself -- [`WeakSender::upgrade`] later hands back a real
+    /// `Sender` only if at least one other still exists.
+    pub fn downgrade(&self) -> WeakSender<T> {
+        WeakSender {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
+}
+
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.shared.inner.lock().unwrap().senders_alive += 1;
@@ -313,6 +324,49 @@ impl<T> Drop for Sender<T> {
                 waker.wake();
             }
         }
+    }
+}
+
+/// A handle to a bounded channel's sender that doesn't keep it (or its
+/// sender count) alive by itself -- obtained via [`Sender::downgrade`].
+/// Useful for a background task that wants to send *if* the channel is
+/// still in use, without that reference alone being why it's still in
+/// use (e.g. a task holding one of these instead of a real `Sender`
+/// won't stop the receiver from ever seeing the channel close).
+pub struct WeakSender<T> {
+    shared: Weak<Shared<T>>,
+}
+
+impl<T> WeakSender<T> {
+    /// Hands back a real, usable `Sender` -- but only if at least one
+    /// other `Sender` (or another still-live `WeakSender::upgrade`
+    /// result) already exists. `None` once every real `Sender` has been
+    /// dropped, even if the `Receiver` is still alive: a `WeakSender`
+    /// tracks "is there still a real sender", not just "is the
+    /// underlying channel state still allocated".
+    pub fn upgrade(&self) -> Option<Sender<T>> {
+        let shared = self.shared.upgrade()?;
+        let mut guard = shared.inner.lock().unwrap();
+        if guard.senders_alive == 0 {
+            return None;
+        }
+        guard.senders_alive += 1;
+        drop(guard);
+        Some(Sender { shared })
+    }
+}
+
+impl<T> Clone for WeakSender<T> {
+    fn clone(&self) -> Self {
+        WeakSender {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for WeakSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakSender").finish()
     }
 }
 
@@ -608,6 +662,15 @@ impl<T> UnboundedSender<T> {
         }
         Ok(())
     }
+
+    /// A weak handle that doesn't keep the channel's sender count alive
+    /// by itself -- see [`Sender::downgrade`]/[`WeakSender`] for the
+    /// full reasoning, identical here.
+    pub fn downgrade(&self) -> WeakUnboundedSender<T> {
+        WeakUnboundedSender {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
 }
 
 impl<T> Clone for UnboundedSender<T> {
@@ -632,6 +695,40 @@ impl<T> Drop for UnboundedSender<T> {
                 waker.wake();
             }
         }
+    }
+}
+
+/// The [`UnboundedSender`] counterpart of [`WeakSender`] -- see that
+/// type's own docs for the full reasoning, identical here.
+pub struct WeakUnboundedSender<T> {
+    shared: Weak<UnboundedShared<T>>,
+}
+
+impl<T> WeakUnboundedSender<T> {
+    /// See [`WeakSender::upgrade`] -- identical semantics here.
+    pub fn upgrade(&self) -> Option<UnboundedSender<T>> {
+        let shared = self.shared.upgrade()?;
+        let mut guard = shared.inner.lock().unwrap();
+        if guard.senders_alive == 0 {
+            return None;
+        }
+        guard.senders_alive += 1;
+        drop(guard);
+        Some(UnboundedSender { shared })
+    }
+}
+
+impl<T> Clone for WeakUnboundedSender<T> {
+    fn clone(&self) -> Self {
+        WeakUnboundedSender {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for WeakUnboundedSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakUnboundedSender").finish()
     }
 }
 

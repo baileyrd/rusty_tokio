@@ -1023,6 +1023,87 @@ fn send_timeout_reports_closed_once_the_receiver_drops() {
 }
 
 #[test]
+fn mpsc_weak_sender_upgrades_while_a_real_sender_is_alive() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(4);
+        let weak = tx.downgrade();
+
+        let upgraded = weak.upgrade().expect("a real Sender is still alive");
+        upgraded.send(1).await.unwrap();
+        assert_eq!(rx.recv().await, Some(1));
+
+        drop(upgraded);
+        // `tx` itself is still alive, so upgrading must still work.
+        assert!(weak.upgrade().is_some());
+        drop(tx);
+    });
+}
+
+#[test]
+fn mpsc_weak_sender_fails_to_upgrade_once_every_real_sender_drops() {
+    let (tx, rx) = mpsc::channel::<i32>(4);
+    let weak = tx.downgrade();
+    drop(tx);
+
+    // The Receiver is still alive, but no real Sender is -- upgrade
+    // must report that, not just "the channel state still exists".
+    assert!(weak.upgrade().is_none());
+    drop(rx);
+}
+
+#[test]
+fn mpsc_weak_sender_clone_shares_the_same_target() {
+    let (tx, _rx) = mpsc::channel::<i32>(4);
+    let weak_a = tx.downgrade();
+    let weak_b = weak_a.clone();
+    assert!(weak_a.upgrade().is_some());
+    assert!(weak_b.upgrade().is_some());
+}
+
+#[test]
+fn mpsc_unbounded_weak_sender_upgrades_while_a_real_sender_is_alive() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let weak = tx.downgrade();
+
+        let upgraded = weak
+            .upgrade()
+            .expect("a real UnboundedSender is still alive");
+        upgraded.send(1).unwrap();
+        assert_eq!(rx.recv().await, Some(1));
+
+        drop(upgraded);
+        drop(tx);
+        assert!(weak.upgrade().is_none());
+    });
+}
+
+#[test]
+fn broadcast_weak_sender_fails_to_upgrade_once_every_real_sender_drops() {
+    let (tx, rx) = rusty_tokio::sync::broadcast::channel::<i32>(4);
+    let weak = tx.downgrade();
+    drop(tx);
+
+    assert!(weak.upgrade().is_none());
+    drop(rx);
+}
+
+#[test]
+fn broadcast_weak_sender_upgrade_can_still_send_to_existing_receivers() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = rusty_tokio::sync::broadcast::channel::<i32>(4);
+        let weak = tx.downgrade();
+
+        let upgraded = weak.upgrade().unwrap();
+        upgraded.send(42).unwrap();
+        assert_eq!(rx.recv().await.unwrap(), 42);
+    });
+}
+
+#[test]
 fn unbounded_send_never_blocks_even_far_past_any_bounded_capacity() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {

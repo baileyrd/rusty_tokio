@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
 struct Inner<T> {
@@ -129,6 +129,15 @@ impl<T: Clone> Sender<T> {
     pub fn receiver_count(&self) -> usize {
         self.shared.inner.lock().unwrap().receivers_alive
     }
+
+    /// A weak handle that doesn't keep the channel's sender count alive
+    /// by itself -- see `sync::mpsc`'s own `WeakSender` docs for the
+    /// full reasoning, identical here.
+    pub fn downgrade(&self) -> WeakSender<T> {
+        WeakSender {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
 }
 
 impl<T> Clone for Sender<T> {
@@ -154,6 +163,44 @@ impl<T> Drop for Sender<T> {
                 waker.wake();
             }
         }
+    }
+}
+
+/// A handle to a broadcast channel's sender that doesn't keep it (or its
+/// sender count) alive by itself -- obtained via [`Sender::downgrade`].
+/// See `sync::mpsc::WeakSender`'s own docs for the full reasoning,
+/// identical here.
+pub struct WeakSender<T> {
+    shared: Weak<Shared<T>>,
+}
+
+impl<T> WeakSender<T> {
+    /// Hands back a real, usable `Sender` -- but only if at least one
+    /// other `Sender` already exists. `None` once every real `Sender`
+    /// has been dropped, even if receivers are still alive.
+    pub fn upgrade(&self) -> Option<Sender<T>> {
+        let shared = self.shared.upgrade()?;
+        let mut guard = shared.inner.lock().unwrap();
+        if guard.senders_alive == 0 {
+            return None;
+        }
+        guard.senders_alive += 1;
+        drop(guard);
+        Some(Sender { shared })
+    }
+}
+
+impl<T> Clone for WeakSender<T> {
+    fn clone(&self) -> Self {
+        WeakSender {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for WeakSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakSender").finish()
     }
 }
 
