@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, BytesMut};
-use rusty_tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use rusty_tokio::io::{self, AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream, UdpSocket};
 use rusty_tokio::Runtime;
 
 #[test]
@@ -95,5 +95,92 @@ fn write_all_buf_drains_the_whole_buffer_even_past_one_duplex_chunk() {
         }
         assert_eq!(received, payload);
         write_task.await.unwrap();
+    });
+}
+
+#[test]
+fn try_read_buf_fills_a_bytesmut_once_readable() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream.write_all(b"try read buf").await.unwrap();
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let mut dst = BytesMut::with_capacity(64);
+        let n = loop {
+            client.readable().await.unwrap();
+            match client.try_read_buf(&mut dst) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        };
+        assert_eq!(n, 12);
+        assert_eq!(&dst[..], b"try read buf");
+
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn recv_buf_from_fills_a_bytesmut_and_reports_the_sender() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let b_addr = b.local_addr().unwrap();
+
+        a.send_to(b"datagram payload", b_addr).await.unwrap();
+
+        let mut dst = BytesMut::with_capacity(64);
+        let (n, from) = b.recv_buf_from(&mut dst).await.unwrap();
+        assert_eq!(n, 16);
+        assert_eq!(&dst[..], b"datagram payload");
+        assert_eq!(from, a_addr);
+    });
+}
+
+#[test]
+fn recv_buf_fills_a_bytesmut_after_connect() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        a.connect(b.local_addr().unwrap()).unwrap();
+        b.connect(a.local_addr().unwrap()).unwrap();
+
+        a.send(b"connected payload").await.unwrap();
+
+        let mut dst = BytesMut::with_capacity(64);
+        let n = b.recv_buf(&mut dst).await.unwrap();
+        assert_eq!(n, 17);
+        assert_eq!(&dst[..], b"connected payload");
+    });
+}
+
+#[test]
+fn recv_buf_from_truncates_to_the_buffers_remaining_capacity_like_a_real_datagram_read() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b_addr = b.local_addr().unwrap();
+
+        a.send_to(b"0123456789", b_addr).await.unwrap();
+
+        // Only 4 bytes of capacity -- the rest of the 10-byte datagram
+        // must be discarded, matching real `recvfrom(2)` truncation
+        // semantics, not held back for a later read.
+        let mut storage = [0u8; 4];
+        let mut dst: &mut [u8] = &mut storage;
+        let (n, _from) = b.recv_buf_from(&mut dst).await.unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&storage, b"0123");
     });
 }

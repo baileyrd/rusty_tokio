@@ -25,6 +25,14 @@ use platform_macos::MacosUdpSocket as PlatformUdpSocket;
 #[cfg(target_os = "windows")]
 use socket::windows::WindowsUdpSocket as PlatformUdpSocket;
 
+/// The largest possible UDP payload over IPv4 -- a 65535-byte IPv4
+/// packet minus the fixed 20-byte IP header and 8-byte UDP header.
+/// [`UdpSocket::recv_buf`]/[`recv_buf_from`](UdpSocket::recv_buf_from)
+/// cap their temporary read buffer here, so a caller-provided
+/// [`bytes::BufMut`] with unbounded `remaining_mut()` (e.g.
+/// `bytes::BytesMut`) doesn't trigger an attempt to allocate that much.
+pub const MAX_UDP_DATAGRAM_SIZE: usize = 65_507;
+
 /// A non-blocking, epoll-driven UDP socket. `bind`/`send_to`/
 /// `recv_from`/`local_addr` never block on their own (only readiness
 /// does), so unlike `TcpStream` there was no need to hand-roll anything
@@ -52,6 +60,32 @@ impl UdpSocket {
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         std::future::poll_fn(|cx| self.poll_recv_from(cx, buf)).await
+    }
+
+    /// Like [`recv_from`](Self::recv_from), but into a
+    /// [`bytes::BufMut`]'s spare capacity instead of a plain
+    /// `&mut [u8]`.
+    ///
+    /// Sized to `buf`'s remaining capacity capped at
+    /// [`MAX_UDP_DATAGRAM_SIZE`] -- not some much smaller fixed chunk
+    /// the way [`TcpStream::try_read_buf`](super::TcpStream::try_read_buf)
+    /// is, since unlike a stream, a datagram that doesn't fit the
+    /// buffer passed to `recvfrom(2)` is truncated and the rest
+    /// silently discarded rather than held back for a later read; but
+    /// also not the full, uncapped `remaining_mut()` an auto-growing
+    /// `BufMut` like `bytes::BytesMut` reports as effectively unbounded
+    /// (`isize::MAX`-ish), which would otherwise try to allocate an
+    /// impossible temporary buffer. No real datagram exceeds the cap, so
+    /// this never truncates one that would otherwise have fit.
+    pub async fn recv_buf_from<B: bytes::BufMut>(
+        &self,
+        buf: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
+        let want = buf.remaining_mut().min(MAX_UDP_DATAGRAM_SIZE);
+        let mut chunk = vec![0u8; want];
+        let (n, addr) = self.recv_from(&mut chunk).await?;
+        buf.put_slice(&chunk[..n]);
+        Ok((n, addr))
     }
 
     /// Non-`async fn` form of [`send_to`](Self::send_to).
@@ -152,6 +186,19 @@ impl UdpSocket {
     /// socket.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| self.poll_recv(cx, buf)).await
+    }
+
+    /// Like [`recv`](Self::recv), but into a [`bytes::BufMut`]'s spare
+    /// capacity -- see [`recv_buf_from`](Self::recv_buf_from) for why
+    /// this is sized to `buf`'s remaining capacity capped at
+    /// [`MAX_UDP_DATAGRAM_SIZE`] rather than some smaller fixed chunk
+    /// (or `buf`'s own, possibly-unbounded `remaining_mut()` directly).
+    pub async fn recv_buf<B: bytes::BufMut>(&self, buf: &mut B) -> io::Result<usize> {
+        let want = buf.remaining_mut().min(MAX_UDP_DATAGRAM_SIZE);
+        let mut chunk = vec![0u8; want];
+        let n = self.recv(&mut chunk).await?;
+        buf.put_slice(&chunk[..n]);
+        Ok(n)
     }
 
     /// Non-`async fn` form of [`send`](Self::send).
