@@ -360,3 +360,64 @@ fn wait_with_output_works_when_only_stdout_is_piped() {
         assert_eq!(output.stderr, b"");
     });
 }
+
+#[test]
+fn child_stdout_into_owned_fd_still_reads_after_extraction() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("echo hello from fd")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        let fd = stdout.into_owned_fd().unwrap();
+
+        // Read directly off the extracted, duplicated fd via a plain
+        // std::fs::File, entirely bypassing this crate's own reactor --
+        // proves it's a real, still-open, independent fd.
+        let contents = rusty_tokio::spawn_blocking(move || {
+            let mut file = std::fs::File::from(fd);
+            let mut contents = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut contents)?;
+            Ok::<_, std::io::Error>(contents)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(contents, b"hello from fd\n");
+
+        child.wait().await.unwrap();
+    });
+}
+
+#[test]
+fn child_stdin_into_owned_fd_still_delivers_input_after_extraction() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdin = child.stdin.take().unwrap();
+        let fd = stdin.into_owned_fd().unwrap();
+
+        rusty_tokio::spawn_blocking(move || {
+            let mut file = std::fs::File::from(fd);
+            std::io::Write::write_all(&mut file, b"through extracted fd")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        // Dropping `file` above (end of the blocking closure) closes
+        // the extracted fd, delivering EOF so `cat` finishes up.
+
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"through extracted fd");
+    });
+}

@@ -435,6 +435,21 @@ impl PipeIo {
         let io = reactor.register(fd.as_raw_fd())?;
         Ok(PipeIo { fd, io, reactor })
     }
+
+    /// Duplicates the underlying fd (`dup(2)`) and hands it back as a
+    /// plain [`OwnedFd`], reset to blocking mode -- see
+    /// [`ChildStdin::into_owned_fd`]'s docs for why this duplicates
+    /// rather than transferring the original fd directly. Reset to
+    /// blocking because `O_NONBLOCK` lives on the shared open file
+    /// description, not the fd number, so the duplicate would otherwise
+    /// inherit this crate's own non-blocking setting -- surprising for
+    /// a caller who never asked for that and has no reactor of their
+    /// own driving readiness for it.
+    fn dup_owned_fd(&self) -> io::Result<OwnedFd> {
+        let cloned = self.fd.try_clone()?;
+        socket::set_nonblocking(cloned.as_raw_fd(), false)?;
+        Ok(cloned)
+    }
 }
 
 impl Drop for PipeIo {
@@ -451,6 +466,22 @@ pub struct ChildStdin(PipeIo);
 impl ChildStdin {
     fn adopt(stdin: std::process::ChildStdin) -> io::Result<ChildStdin> {
         Ok(ChildStdin(PipeIo::adopt(OwnedFd::from(stdin))?))
+    }
+
+    /// Duplicates the underlying pipe fd (`dup(2)`) and hands it back
+    /// as a plain [`OwnedFd`] -- e.g. to pass along as another
+    /// `std::process::Command`'s own `stdin` via `Stdio::from`.
+    /// Duplicates rather than transferring the original fd directly
+    /// (the same choice [`crate::io::TcpListener::into_std`] makes, for
+    /// the identical reason): `self` still drops normally right after
+    /// this returns (deregistering from the reactor and closing its
+    /// own, original fd), and the returned `OwnedFd` is an independent
+    /// fd referring to the same underlying open file description --
+    /// avoids the double-deregister/double-close hazard a true
+    /// ownership transfer out of an already-reactor-registered fd would
+    /// otherwise need much more careful handling to avoid.
+    pub fn into_owned_fd(self) -> io::Result<OwnedFd> {
+        self.0.dup_owned_fd()
     }
 }
 
@@ -490,6 +521,12 @@ impl ChildStdout {
     fn adopt(stdout: std::process::ChildStdout) -> io::Result<ChildStdout> {
         Ok(ChildStdout(PipeIo::adopt(OwnedFd::from(stdout))?))
     }
+
+    /// See [`ChildStdin::into_owned_fd`] -- identical reasoning, the
+    /// read end instead of the write end.
+    pub fn into_owned_fd(self) -> io::Result<OwnedFd> {
+        self.0.dup_owned_fd()
+    }
 }
 
 impl AsyncRead for ChildStdout {
@@ -518,6 +555,12 @@ pub struct ChildStderr(PipeIo);
 impl ChildStderr {
     fn adopt(stderr: std::process::ChildStderr) -> io::Result<ChildStderr> {
         Ok(ChildStderr(PipeIo::adopt(OwnedFd::from(stderr))?))
+    }
+
+    /// See [`ChildStdin::into_owned_fd`] -- identical reasoning, the
+    /// stderr read end instead of stdin's write end.
+    pub fn into_owned_fd(self) -> io::Result<OwnedFd> {
+        self.0.dup_owned_fd()
     }
 }
 
