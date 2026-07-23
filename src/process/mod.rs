@@ -86,6 +86,16 @@ impl Command {
         self
     }
 
+    /// Sets the value passed as `argv[0]` to the child process --
+    /// distinct from [`new`](Self::new)'s `program` argument, which is
+    /// still what's actually executed (`execve`'s own path argument);
+    /// only the name the child *sees itself invoked as* changes. Thin
+    /// forward to [`std::os::unix::process::CommandExt::arg0`].
+    pub fn arg0(&mut self, arg: impl AsRef<OsStr>) -> &mut Command {
+        std::os::unix::process::CommandExt::arg0(&mut self.inner, arg);
+        self
+    }
+
     pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Command {
         self.inner.env(key, val);
         self

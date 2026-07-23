@@ -157,3 +157,25 @@ fn id_stays_available_after_the_child_has_been_waited_on() {
         assert_eq!(child.id(), id);
     });
 }
+
+#[test]
+fn arg0_sets_argv_zero_without_changing_which_binary_actually_runs() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut child = Command::new("/bin/sh")
+            .arg0("totally-not-sh")
+            .arg("-c")
+            .arg("echo $0")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut contents = Vec::new();
+        stdout.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"totally-not-sh\n");
+
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+    });
+}
