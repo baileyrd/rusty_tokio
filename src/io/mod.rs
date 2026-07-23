@@ -39,6 +39,7 @@ mod duplex;
 mod interest;
 mod lookup;
 pub(crate) mod reactor;
+mod simplex;
 pub(crate) mod socket;
 mod stdio;
 mod tcp;
@@ -61,6 +62,7 @@ pub use compat::Compat;
 pub use duplex::{duplex, DuplexStream};
 pub use interest::{Interest, Ready};
 pub use lookup::{lookup_host, LookupHost};
+pub use simplex::{simplex, SimplexStream};
 pub use stdio::{stderr, stdin, stdout, Stderr, Stdin, Stdout};
 pub use tcp::{
     OwnedReadHalf, OwnedWriteHalf, ReadHalf, TcpListener, TcpSocket, TcpStream, WriteHalf,
