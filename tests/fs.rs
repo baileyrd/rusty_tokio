@@ -635,3 +635,146 @@ fn write_creates_and_truncates_the_file_in_one_call() {
     });
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn file_create_new_fails_if_the_file_already_exists() {
+    let path = temp_path("create-new");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create_new(&path).await.unwrap();
+        file.write_all(b"hello").await.unwrap();
+
+        let Err(err) = File::create_new(&path).await else {
+            panic!("expected create_new to fail since the file already exists");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Unlike `create`, the existing file's contents survive the
+        // failed second call.
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn open_options_append_writes_go_to_the_end() {
+    let path = temp_path("open-options-append");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::write(&path, b"first-").await.unwrap();
+
+        let mut file = File::options().append(true).open(&path).await.unwrap();
+        file.write_all(b"second").await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"first-second");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn open_options_without_create_fails_on_a_missing_file() {
+    let path = temp_path("open-options-missing");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let Err(err) = File::options().write(true).open(&path).await else {
+            panic!("expected open to fail on a missing file without create()");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    });
+}
+
+#[test]
+fn open_options_create_new_fails_if_the_file_already_exists() {
+    let path = temp_path("open-options-create-new");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let Err(err) = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        else {
+            panic!("expected create_new to fail since the file already exists");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn open_options_truncate_empties_an_existing_file() {
+    let path = temp_path("open-options-truncate");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::write(&path, b"leftover contents")
+            .await
+            .unwrap();
+
+        let _file = File::options()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn open_options_mode_sets_unix_permission_bits_on_a_created_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("open-options-mode");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        File::options()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // Same reasoning as `dir_builder_mode_sets_unix_permission_bits`:
+        // the requested mode has no group/other bits, and the process
+        // umask can only clear bits (never set ones the mode didn't
+        // request), so those bits are guaranteed absent regardless of
+        // the ambient umask.
+        assert_eq!(mode & 0o077, 0);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn open_options_custom_flags_ors_in_extra_open_flags() {
+    let path = temp_path("open-options-custom-flags");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        // `O_APPEND` via `custom_flags` rather than `.append(true)` --
+        // exercises that the raw flag actually reaches the underlying
+        // `open(2)` call, not just this builder's own named options.
+        rusty_tokio::fs::write(&path, b"first-").await.unwrap();
+        let mut file = File::options()
+            .write(true)
+            .custom_flags(libc::O_APPEND)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(b"second").await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"first-second");
+    });
+    std::fs::remove_file(&path).unwrap();
+}

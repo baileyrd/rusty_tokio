@@ -1,4 +1,4 @@
-//! Async filesystem I/O: [`File`] and [`DirBuilder`].
+//! Async filesystem I/O: [`File`], [`OpenOptions`], and [`DirBuilder`].
 //!
 //! A regular file can't be registered with `epoll`/`kevent`'s readiness
 //! model the way a socket can -- from the kernel's point of view a file
@@ -107,6 +107,24 @@ impl File {
     pub async fn create(path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref().to_path_buf();
         Self::spawn_open(move || std::fs::File::create(path)).await
+    }
+
+    /// Like [`create`](Self::create), but fails instead of truncating if
+    /// a file already exists at `path`. See `std::fs::File::create_new`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn create_new(path: impl AsRef<Path>) -> io::Result<File> {
+        let path = path.as_ref().to_path_buf();
+        Self::spawn_open(move || std::fs::File::create_new(path)).await
+    }
+
+    /// A blank [`OpenOptions`] builder, for opening with options
+    /// [`open`](Self::open)/[`create`](Self::create) don't cover (e.g.
+    /// appending, or failing rather than truncating an existing file).
+    /// See `std::fs::File::options`.
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
     }
 
     async fn spawn_open(
@@ -504,6 +522,110 @@ impl AsyncSeek for File {
                 State::Poisoned => return Poll::Ready(Err(poisoned_error())),
             }
         }
+    }
+}
+
+/// A builder for opening a file with options [`File::open`]/
+/// [`File::create`] don't cover -- appending, failing rather than
+/// truncating an existing file, or (Unix-only) a specific mode/raw
+/// `open(2)` flags. See `std::fs::OpenOptions` / tokio's
+/// `fs::OpenOptions`.
+///
+/// A thin wrapper around `std::fs::OpenOptions` itself (unlike
+/// [`DirBuilder`], this one *is* `Clone`, so there's no need to
+/// reassemble it field-by-field on the blocking-pool thread inside
+/// [`open`](Self::open) -- the whole builder is just cloned in).
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+    inner: std::fs::OpenOptions,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenOptions {
+    /// A blank builder: every option starts `false`. See
+    /// `std::fs::OpenOptions::new`.
+    pub fn new() -> Self {
+        Self {
+            inner: std::fs::OpenOptions::new(),
+        }
+    }
+
+    /// Opens for reading. See `std::fs::OpenOptions::read`.
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.inner.read(read);
+        self
+    }
+
+    /// Opens for writing. See `std::fs::OpenOptions::write`.
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.inner.write(write);
+        self
+    }
+
+    /// Every write goes to the end of the file, atomically with respect
+    /// to other writers. See `std::fs::OpenOptions::append`.
+    pub fn append(&mut self, append: bool) -> &mut Self {
+        self.inner.append(append);
+        self
+    }
+
+    /// Truncates the file to zero length if it already exists. See
+    /// `std::fs::OpenOptions::truncate`.
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.inner.truncate(truncate);
+        self
+    }
+
+    /// Creates the file if it doesn't already exist. See
+    /// `std::fs::OpenOptions::create`.
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.inner.create(create);
+        self
+    }
+
+    /// Like [`create`](Self::create), but fails instead if the file
+    /// already exists. See `std::fs::OpenOptions::create_new`.
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.inner.create_new(create_new);
+        self
+    }
+
+    /// Sets the Unix mode bits (masked by the process umask) a newly
+    /// created file gets -- only meaningful alongside
+    /// [`create`](Self::create)/[`create_new`](Self::create_new). See
+    /// `std::os::unix::fs::OpenOptionsExt::mode`. Unix-only.
+    #[cfg(unix)]
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.inner.mode(mode);
+        self
+    }
+
+    /// ORs extra raw `open(2)` flags (e.g. `O_NOFOLLOW`, `O_DIRECT`) into
+    /// the ones this builder's other methods already set -- the flags
+    /// those methods set take precedence on conflict. See
+    /// `std::os::unix::fs::OpenOptionsExt::custom_flags`. Unix-only.
+    #[cfg(unix)]
+    pub fn custom_flags(&mut self, flags: i32) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.inner.custom_flags(flags);
+        self
+    }
+
+    /// Opens `path` with this builder's configured options. See
+    /// `std::fs::OpenOptions::open`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+        let opts = self.inner.clone();
+        let path = path.as_ref().to_path_buf();
+        File::spawn_open(move || opts.open(path)).await
     }
 }
 
