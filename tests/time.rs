@@ -29,6 +29,39 @@ fn interval_at_second_tick_is_exactly_one_period_after_start() {
 }
 
 #[test]
+fn poll_tick_is_pending_before_the_deadline_then_ready_at_it() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let start = Instant::now() + Duration::from_millis(30);
+        let period = Duration::from_millis(10);
+        let mut ticker = interval_at(start, period);
+
+        // Polling manually, well before `start`, rather than `.await`ing
+        // `tick()` -- exercises the same poll-based entry point a manual
+        // `Future`/`Stream` impl would drive directly.
+        std::future::poll_fn(|cx| match ticker.poll_tick(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(_) => panic!("expected Pending before the deadline"),
+        })
+        .await;
+
+        let first = ticker.tick().await;
+        assert_eq!(first, start);
+
+        // A second poll_tick, before the next period elapses, is
+        // Pending again rather than immediately Ready.
+        std::future::poll_fn(|cx| match ticker.poll_tick(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(_) => panic!("expected Pending right after the first tick"),
+        })
+        .await;
+
+        let second = ticker.tick().await;
+        assert_eq!(second, start + period);
+    });
+}
+
+#[test]
 fn missed_tick_default_is_burst() {
     let ticker = interval_at(Instant::now(), Duration::from_millis(10));
     assert_eq!(ticker.missed_tick_behavior(), MissedTickBehavior::Burst);
