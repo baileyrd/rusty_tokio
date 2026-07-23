@@ -22,7 +22,7 @@ mod current_thread;
 mod metrics;
 mod worker;
 
-pub use context::Handle;
+pub use context::{EnterGuard, Handle};
 pub use metrics::RuntimeMetrics;
 
 use crate::io::reactor::Reactor;
@@ -628,6 +628,14 @@ impl Runtime {
         RuntimeMetrics {
             shared: self.shared.clone(),
         }
+    }
+
+    /// Installs this runtime as the ambient one for as long as the
+    /// returned [`EnterGuard`] lives. Equivalent to
+    /// `self.handle().enter()` -- see [`Handle::enter`] for the full
+    /// contract.
+    pub fn enter(&self) -> EnterGuard {
+        self.handle().enter()
     }
 
     /// Spawn a future onto the pool. It starts running as soon as a

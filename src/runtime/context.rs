@@ -132,6 +132,18 @@ impl Handle {
         }
     }
 
+    /// Installs this runtime as the ambient one for as long as the
+    /// returned [`EnterGuard`] lives (restoring whatever was ambient
+    /// before once it's dropped) -- without this, constructing
+    /// something that needs an ambient runtime (e.g.
+    /// [`crate::time::sleep`]) outside a `block_on`/spawned task panics.
+    /// Unlike `spawn`, `f` still runs synchronously on the calling
+    /// thread; this just makes the runtime *reachable* for the duration
+    /// of the call, not scheduled onto the worker pool.
+    pub fn enter(&self) -> EnterGuard {
+        enter(self.shared.clone())
+    }
+
     /// Runs `f` inline on the calling thread, first handing its other
     /// queued work off to a freshly spawned replacement worker so the
     /// rest of the pool doesn't stall while `f` (expected to block) runs.
@@ -166,8 +178,13 @@ impl Handle {
 /// lives, restoring whatever was there before on drop (so nested
 /// `block_on` calls -- e.g. a test harness inside a bigger runtime --
 /// behave sanely).
+///
+/// Returned by [`Handle::enter`]/[`super::Runtime::enter`] -- lets code
+/// that needs the ambient runtime available (e.g. constructing a
+/// `crate::time::Sleep` outside an `async fn` this runtime is already
+/// driving) do so explicitly, without a full `block_on`/`spawn`.
 #[must_use]
-pub(crate) struct EnterGuard {
+pub struct EnterGuard {
     previous: Option<Handle>,
 }
 
