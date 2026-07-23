@@ -32,7 +32,7 @@ mod yield_now;
 pub use block_in_place::block_in_place;
 pub use builder::Builder;
 pub use id::{try_id, try_name, TaskId};
-pub use join::{JoinError, JoinHandle};
+pub use join::{AbortHandle, JoinError, JoinHandle};
 pub use join_set::JoinSet;
 pub use local::{spawn_local, LocalSet};
 pub use local_key::{AccessError, LocalKey, TaskLocalFuture};

@@ -5,6 +5,7 @@ use std::any::Any;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -34,12 +35,21 @@ pub(super) type AbnormalHook = Box<dyn FnOnce(Outcome) + Send>;
 
 pub(super) struct JoinInner<T> {
     state: Mutex<JoinState<T>>,
+    /// Mirrors whether `state` has reached `Done`/`Taken`, but as a plain
+    /// `Arc<AtomicBool>` rather than living inside `Mutex<JoinState<T>>`
+    /// so [`AbortHandle`]'s `is_finished` closure can capture just this
+    /// flag instead of the whole `Arc<JoinInner<T>>` -- capturing the
+    /// latter would require `JoinInner<T>: Sync`, which requires `T:
+    /// Send`, which would wrongly rule out the non-`Send` `T`s that
+    /// `LocalSet::spawn_local` tasks use.
+    finished: Arc<AtomicBool>,
 }
 
 impl<T> JoinInner<T> {
     pub(super) fn new() -> Self {
         JoinInner {
             state: Mutex::new(JoinState::Running),
+            finished: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -59,6 +69,7 @@ impl<T> JoinInner<T> {
         let mut guard = self.state.lock().unwrap();
         let old = std::mem::replace(&mut *guard, JoinState::Done(result));
         drop(guard);
+        self.finished.store(true, Ordering::Release);
         if let JoinState::Waiting(waker) = old {
             waker.wake();
         }
@@ -81,6 +92,17 @@ impl<T> JoinInner<T> {
             }
         }
     }
+
+    /// Non-consuming, non-blocking check -- unlike `poll`, doesn't
+    /// require a `Context` and never transitions `Done` to `Taken`, so
+    /// it can be called any number of times without disturbing a
+    /// subsequent real `.await` of the handle.
+    fn is_finished(&self) -> bool {
+        matches!(
+            *self.state.lock().unwrap(),
+            JoinState::Done(_) | JoinState::Taken
+        )
+    }
 }
 
 /// An awaitable handle to a spawned task. Dropping it does **not**
@@ -99,8 +121,10 @@ pub struct JoinHandle<T> {
     /// without either one needing to know about the other -- `T`'s own
     /// `Send`-ness (or lack of it) still propagates correctly through
     /// `inner: Arc<JoinInner<T>>` either way, since this closure never
-    /// touches `T` at all.
-    abort: Option<Box<dyn Fn() + Send + Sync>>,
+    /// touches `T` at all. `Arc` rather than `Box` so [`AbortHandle`]
+    /// (obtained from [`abort_handle`](Self::abort_handle)) can cheaply
+    /// clone the exact same thunk instead of needing its own copy.
+    abort: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl<T> JoinHandle<T> {
@@ -120,7 +144,7 @@ impl<T> JoinHandle<T> {
 
     pub(super) fn with_task(mut self, task: Arc<Task>) -> Self {
         let weak = Arc::downgrade(&task);
-        self.abort = Some(Box::new(move || {
+        self.abort = Some(Arc::new(move || {
             if let Some(task) = weak.upgrade() {
                 task.abort();
             }
@@ -133,7 +157,7 @@ impl<T> JoinHandle<T> {
     /// multi-threaded scheduler's own `Task`.
     pub(super) fn with_local_task(mut self, task: Arc<super::local::LocalTask>) -> Self {
         let weak = Arc::downgrade(&task);
-        self.abort = Some(Box::new(move || {
+        self.abort = Some(Arc::new(move || {
             if let Some(task) = weak.upgrade() {
                 task.abort();
             }
@@ -150,6 +174,75 @@ impl<T> JoinHandle<T> {
         if let Some(abort) = &self.abort {
             abort();
         }
+    }
+
+    /// Non-blocking check for whether the task has already finished
+    /// (successfully, panicked, or aborted) -- doesn't consume the
+    /// handle or require polling it.
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    /// A separate, cloneable, abort-only capability for this same task
+    /// -- unlike this `JoinHandle` itself, an `AbortHandle` can be handed
+    /// out to other code (or kept around after this `JoinHandle` drops)
+    /// without also granting the ability to `.await` the task's result.
+    pub fn abort_handle(&self) -> AbortHandle {
+        let finished = self.inner.finished.clone();
+        AbortHandle {
+            id: self.id,
+            abort: self
+                .abort
+                .clone()
+                .unwrap_or_else(|| Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>),
+            is_finished: Arc::new(move || finished.load(Ordering::Acquire)),
+        }
+    }
+}
+
+/// A cloneable, abort-only capability for a spawned task, obtained via
+/// [`JoinHandle::abort_handle`]. Keeps working even after the
+/// `JoinHandle` it came from is dropped (it doesn't hold or need the
+/// join side at all, just a `Weak` reference to the task itself,
+/// captured inside the shared `abort`/`is_finished` thunks).
+pub struct AbortHandle {
+    id: TaskId,
+    abort: Arc<dyn Fn() + Send + Sync>,
+    is_finished: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl AbortHandle {
+    /// This task's stable identity -- the same one `JoinHandle::id`
+    /// reports for the same task.
+    pub fn id(&self) -> TaskId {
+        self.id
+    }
+
+    /// Request that the task be cancelled -- see [`JoinHandle::abort`]
+    /// for the full semantics (best-effort, asynchronous).
+    pub fn abort(&self) {
+        (self.abort)();
+    }
+
+    /// Non-blocking check for whether the task has already finished.
+    pub fn is_finished(&self) -> bool {
+        (self.is_finished)()
+    }
+}
+
+impl Clone for AbortHandle {
+    fn clone(&self) -> Self {
+        AbortHandle {
+            id: self.id,
+            abort: self.abort.clone(),
+            is_finished: self.is_finished.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for AbortHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AbortHandle").field("id", &self.id).finish()
     }
 }
 
