@@ -320,7 +320,9 @@ mod coop;
 mod macros;
 mod runtime;
 
-pub use runtime::{Builder, EnterGuard, Handle, Runtime, RuntimeMetrics};
+pub use runtime::{
+    Builder, EnterGuard, Handle, LocalOptions, LocalRuntime, Runtime, RuntimeMetrics,
+};
 pub use rusty_tokio_macros::{main, test};
 pub use std::pin::pin;
 pub use task::{JoinError, JoinHandle};

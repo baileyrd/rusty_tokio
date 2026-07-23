@@ -34,6 +34,7 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 /// Runs `f` (a single steal attempt against a `Stealer` or `Injector`)
@@ -589,11 +590,180 @@ impl Builder {
             is_current_thread,
         })
     }
+
+    /// Builds a [`LocalRuntime`] instead of a plain [`Runtime`] --
+    /// bundles the current-thread scheduler/reactor/timer this `Builder`
+    /// already configures with a [`crate::task::LocalSet`], so
+    /// `!Send` futures can be spawned directly via
+    /// [`LocalRuntime::spawn_local`] rather than separately building a
+    /// `Runtime` and driving a `LocalSet` yourself.
+    ///
+    /// `options` has no configurable fields yet -- accepted (rather
+    /// than omitted) purely so adding one later doesn't need a new
+    /// method, matching real tokio's own forward-compatible shape here.
+    ///
+    /// # Panics
+    /// Panics unless this `Builder` was made with
+    /// [`Builder::new_current_thread`]: a `LocalRuntime`'s
+    /// `spawn_local`'d futures must all run on the single thread that
+    /// calls [`LocalRuntime::block_on`], a guarantee a multi-threaded
+    /// worker pool can't give.
+    pub fn build_local(self, _options: &LocalOptions) -> std::io::Result<LocalRuntime> {
+        assert!(
+            self.flavor == Flavor::CurrentThread,
+            "build_local only makes sense for a Builder::new_current_thread() \
+             runtime -- a LocalRuntime's spawn_local'd futures must all run on \
+             the single thread that calls block_on, which a multi-threaded \
+             worker pool can't guarantee"
+        );
+        let rt = self.build()?;
+        Ok(LocalRuntime {
+            rt,
+            local: crate::task::LocalSet::new(),
+        })
+    }
 }
 
 impl Default for Builder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Reserved for future [`Builder::build_local`] configuration -- no
+/// fields yet, matching real tokio's own forward-compatible shape
+/// (accepted by `build_local` rather than omitted, so adding a field
+/// later doesn't need a new method).
+#[derive(Default)]
+pub struct LocalOptions {
+    _priv: (),
+}
+
+impl LocalOptions {
+    pub fn new() -> Self {
+        LocalOptions::default()
+    }
+}
+
+/// A current-thread [`Runtime`] bundled with a [`crate::task::LocalSet`]
+/// -- see [`Builder::build_local`]. Every [`spawn_local`](Self::spawn_local)'d
+/// future (and every task it in turn spawns onto the same set) runs on
+/// whichever thread calls [`block_on`](Self::block_on), the same
+/// single-thread contract a bare `LocalSet` already documents.
+pub struct LocalRuntime {
+    rt: Runtime,
+    local: crate::task::LocalSet,
+}
+
+impl LocalRuntime {
+    /// A cheap, cloneable handle to this runtime's scheduler, reactor,
+    /// and timer driver -- see [`Runtime::handle`].
+    pub fn handle(&self) -> Handle {
+        self.rt.handle()
+    }
+
+    /// A live view into this runtime's scheduler and blocking pool --
+    /// see [`Runtime::metrics`].
+    pub fn metrics(&self) -> RuntimeMetrics {
+        self.rt.metrics()
+    }
+
+    /// Spawns a `!Send` future onto this runtime's own `LocalSet`. See
+    /// [`crate::task::LocalSet::spawn_local`] -- queues it; nothing
+    /// runs until a [`block_on`](Self::block_on) call on this same
+    /// `LocalRuntime` actually drives it.
+    #[track_caller]
+    pub fn spawn_local<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.local.spawn_local(future)
+    }
+
+    /// Drives *both* this runtime's ordinary (`Handle::spawn`/
+    /// `Runtime::spawn`) task queue *and* its `LocalSet`'s own
+    /// locally-spawned tasks -- interleaved with polling `future` --
+    /// until `future` resolves, all on the calling thread. Repeatable,
+    /// same as [`Runtime::block_on`]/[`crate::task::LocalSet::run_until`].
+    ///
+    /// This has to drain both queues itself rather than simply nesting
+    /// one of `Runtime::block_on`/`LocalSet::run_until` inside the
+    /// other: both are already fully self-contained blocking loops, so
+    /// nesting either inside the other would still leave whichever
+    /// queue belongs to the *inner* call completely undrained for the
+    /// entire time the outer call is blocked on its single poll of the
+    /// inner one -- a task landing on that other queue (e.g. a
+    /// `Handle::spawn` from inside a `spawn_local`'d future) would sit
+    /// forever, since nothing revisits it until the inner call itself
+    /// returns.
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        let _rt_guard = self.rt.enter();
+        let _local_guard = self.local.enter();
+        // So a plain `Handle::spawn`/`Runtime::spawn` from inside
+        // `future` (or from a locally-spawned task) enqueues onto this
+        // thread's own local queue rather than the injector -- the same
+        // registration `current_thread::block_on` does for the
+        // equivalent plain `Runtime`.
+        let _worker_guard = worker::enter_as_worker(0);
+
+        let mut future = std::pin::pin!(future);
+        let waker = Waker::from(Arc::new(LocalRuntimeWaker {
+            shared: self.rt.shared.clone(),
+        }));
+        let mut cx = Context::from_waker(&waker);
+
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+
+            let mut ran_any = false;
+            while let Some(task) = self.rt.shared.next_task(0) {
+                task.run();
+                ran_any = true;
+            }
+            while let Some(task) = self.local.next_local_task() {
+                task.run();
+                ran_any = true;
+            }
+            if ran_any {
+                continue;
+            }
+
+            // Bounded (not precisely-woken) park, same as
+            // `current_thread::block_on`/`LocalSet::run_until` each use
+            // on their own single queue -- parking on the ordinary
+            // queue's own condvar specifically (rather than the local
+            // set's) is fine here even though the two are otherwise
+            // independent: a locally-spawned task's own wake still
+            // reaches this loop within this same bounded timeout, just
+            // not instantly, and `LocalRuntimeWaker` below wakes this
+            // exact condvar regardless of which queue's task caused the
+            // wake.
+            self.rt.shared.park(0);
+        }
+    }
+}
+
+/// Wakes [`LocalRuntime::block_on`]'s own parked loop -- shared by
+/// `future`'s own waker and (via [`task::spawn`]'s ordinary wake path)
+/// anything spawned onto the runtime's regular queue. A locally-spawned
+/// task's wake doesn't go through this (it notifies the `LocalSet`'s own
+/// separate condvar instead), which is fine: see
+/// [`LocalRuntime::block_on`]'s own docs for why the bounded park this
+/// wakes still catches it promptly enough regardless.
+struct LocalRuntimeWaker {
+    shared: Arc<Shared>,
+}
+
+impl Wake for LocalRuntimeWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.shared.wake_all_parked();
     }
 }
 
