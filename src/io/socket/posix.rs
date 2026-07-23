@@ -390,6 +390,112 @@ fn to_sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, socklen_t)> {
     Ok((addr, len as socklen_t))
 }
 
+/// The Linux/Android abstract-namespace counterpart of [`to_sockaddr_un`]
+/// -- `name`'s raw bytes go straight after `sun_path`'s leading NUL
+/// (itself the marker distinguishing an abstract-namespace address from
+/// a pathname one), with no trailing NUL of their own: `name` can
+/// contain arbitrary bytes, including embedded NULs, unlike a pathname.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn to_sockaddr_un_abstract(name: &[u8]) -> io::Result<(libc::sockaddr_un, socklen_t)> {
+    // SAFETY: see `sun_path_offset`.
+    let mut addr: libc::sockaddr_un = unsafe { mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if name.len() + 1 > addr.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AF_UNIX abstract name too long (must fit in sockaddr_un::sun_path minus the \
+             leading NUL marker byte)",
+        ));
+    }
+    // `sun_path[0]` is already 0 from the zeroing above -- the abstract-
+    // namespace marker itself; the name's own bytes start right after it.
+    for (slot, byte) in addr.sun_path[1..].iter_mut().zip(name.iter()) {
+        *slot = *byte as libc::c_char;
+    }
+    let len = sun_path_offset() + 1 + name.len();
+    Ok((addr, len as socklen_t))
+}
+
+/// Packs a [`UnixSocketAddr`](super::super::UnixSocketAddr) (in
+/// its `std::os::unix::net::SocketAddr`-wrapping form -- pathname,
+/// Linux/Android abstract-namespace, or unnamed) into a kernel-layout
+/// `sockaddr_un`, dispatching to whichever of [`to_sockaddr_un`]/
+/// [`to_sockaddr_un_abstract`] actually applies. Backs
+/// [`unix_bind_addr`]/[`unix_connect_addr`].
+fn to_sockaddr_un_from_addr(
+    addr: &std::os::unix::net::SocketAddr,
+) -> io::Result<(libc::sockaddr_un, socklen_t)> {
+    if let Some(path) = addr.as_pathname() {
+        return to_sockaddr_un(path);
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::linux::net::SocketAddrExt;
+        if let Some(name) = addr.as_abstract_name() {
+            return to_sockaddr_un_abstract(name);
+        }
+    }
+    if addr.is_unnamed() {
+        // SAFETY: an all-zero (beyond `sun_family`) `sockaddr_un` is a
+        // valid representation of the unnamed address -- zero-length
+        // `sun_path`.
+        let mut addr: libc::sockaddr_un = unsafe { mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        return Ok((addr, sun_path_offset() as socklen_t));
+    }
+    // Every `std::os::unix::net::SocketAddr` this crate's own targets can
+    // produce is one of the three cases above.
+    unreachable!("AF_UNIX SocketAddr was neither a pathname, an abstract name, nor unnamed")
+}
+
+/// `bind(2)` on a bare, not-yet-bound `AF_UNIX` socket to `addr` -- the
+/// [`UnixSocketAddr`](super::super::UnixSocketAddr)-based counterpart of
+/// [`unix_bind`], adding Linux/Android abstract-namespace support (and
+/// explicit unnamed-address support, though binding to the unnamed
+/// address isn't a generally useful thing to do) on top of the plain
+/// pathname case that alone already handles.
+pub(crate) fn unix_bind_addr(fd: RawFd, addr: &std::os::unix::net::SocketAddr) -> io::Result<()> {
+    let (raw, len) = to_sockaddr_un_from_addr(addr)?;
+    // SAFETY: `raw` holds a valid `sockaddr_un` for exactly `len` bytes
+    // (`to_sockaddr_un_from_addr`'s contract); `fd` is caller-owned and
+    // not yet bound.
+    cvt(unsafe {
+        libc::bind(
+            fd,
+            (&raw as *const libc::sockaddr_un).cast::<sockaddr>(),
+            len,
+        )
+    })?;
+    Ok(())
+}
+
+/// `connect(2)` to `addr` on a non-blocking socket -- the
+/// [`UnixSocketAddr`](super::super::UnixSocketAddr)-based counterpart of
+/// [`unix_connect`], same `EINPROGRESS`-tolerant reasoning.
+pub(crate) fn unix_connect_addr(
+    fd: RawFd,
+    addr: &std::os::unix::net::SocketAddr,
+) -> io::Result<()> {
+    let (raw, len) = to_sockaddr_un_from_addr(addr)?;
+    // SAFETY: `raw` holds a valid `sockaddr_un` for exactly `len` bytes;
+    // `fd` is a valid, freshly created, still-unconnected socket.
+    let r = unsafe {
+        libc::connect(
+            fd,
+            (&raw as *const libc::sockaddr_un).cast::<sockaddr>(),
+            len,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EINPROGRESS) {
+        return Ok(());
+    }
+    Err(err)
+}
+
 /// `connect(2)` to an `AF_UNIX` path on a non-blocking socket -- the
 /// `AF_UNIX` counterpart of [`connect`]; see that function's docs for why
 /// `EINPROGRESS` is treated as success here too.
