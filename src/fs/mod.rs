@@ -28,7 +28,21 @@ enum Op {
     Read(io::Result<Vec<u8>>),
     Write(io::Result<usize>),
     Seek(io::Result<u64>),
+    SetLen(io::Result<()>),
+    SetPermissions(io::Result<()>),
+    SyncAll(io::Result<()>),
+    SyncData(io::Result<()>),
+    TryClone(io::Result<std::fs::File>),
 }
+
+/// The chunk size a single `poll_read`/`poll_write` dispatches to the
+/// blocking pool, absent a call to [`File::set_max_buf_size`] -- matches
+/// tokio's own default. Keeps one oversized read/write from tying up a
+/// blocking-pool thread for an unbounded amount of time; callers reading/
+/// writing more than this just get however much fit, same as a real
+/// `read(2)`/`write(2)` short read/write, and loop (`AsyncReadExt`/
+/// `AsyncWriteExt`'s `_exact`/`_all` helpers already do).
+const DEFAULT_MAX_BUF_SIZE: usize = 2 * 1024 * 1024;
 
 /// `std::fs::File`'s `read`/`write`/`seek` all take `&mut self` (there's
 /// only one file cursor, so genuinely concurrent operations on the same
@@ -72,6 +86,7 @@ fn poisoned_error() -> io::Error {
 /// reactor-driven the way [`crate::io::TcpStream`] is.
 pub struct File {
     state: State,
+    max_buf_size: usize,
 }
 
 impl File {
@@ -102,6 +117,7 @@ impl File {
             .unwrap_or_else(|_| Err(poisoned_error()))
             .map(|std_file| File {
                 state: State::Idle(std_file),
+                max_buf_size: DEFAULT_MAX_BUF_SIZE,
             })
     }
 
@@ -116,6 +132,215 @@ impl File {
             State::Busy(_) | State::Poisoned => unreachable!(),
         }
     }
+
+    /// The current cap on how many bytes a single `poll_read`/
+    /// `poll_write` call dispatches to the blocking pool at once. See
+    /// [`DEFAULT_MAX_BUF_SIZE`]'s docs for why this exists at all.
+    pub fn max_buf_size(&self) -> usize {
+        self.max_buf_size
+    }
+
+    /// Changes the cap [`max_buf_size`](Self::max_buf_size) reports and
+    /// every subsequent read/write respects. Pure in-memory bookkeeping
+    /// -- no I/O, so this doesn't need `spawn_blocking` the way every
+    /// other method here does.
+    pub fn set_max_buf_size(&mut self, max_buf_size: usize) {
+        self.max_buf_size = max_buf_size;
+    }
+
+    /// Truncates or extends the file to exactly `size` bytes. See
+    /// `std::fs::File::set_len`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn set_len(&mut self, size: u64) -> io::Result<()> {
+        std::future::poll_fn(|cx| {
+            self.poll_dispatch(cx, move |f| {
+                let result = f.set_len(size);
+                (f, Op::SetLen(result))
+            })
+        })
+        .await
+    }
+
+    /// Changes the file's permissions. See `std::fs::File::set_permissions`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn set_permissions(&mut self, perm: std::fs::Permissions) -> io::Result<()> {
+        std::future::poll_fn(|cx| {
+            // `poll_fn`'s closure is `FnMut` (may run more than once if
+            // the operation is `Pending` on an earlier poll), but
+            // `poll_dispatch`'s `dispatch` param is `FnOnce` -- cloning
+            // here, once per poll, gives each reconstruction of the
+            // inner closure its own owned copy instead of trying to
+            // move the same outer-captured `perm` more than once.
+            let perm = perm.clone();
+            self.poll_dispatch(cx, move |f| {
+                let result = f.set_permissions(perm);
+                (f, Op::SetPermissions(result))
+            })
+        })
+        .await
+    }
+
+    /// Flushes both the file's data and metadata to disk. See
+    /// `std::fs::File::sync_all`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn sync_all(&mut self) -> io::Result<()> {
+        std::future::poll_fn(|cx| {
+            self.poll_dispatch(cx, |f| {
+                let result = f.sync_all();
+                (f, Op::SyncAll(result))
+            })
+        })
+        .await
+    }
+
+    /// Flushes the file's data to disk, but not necessarily metadata that
+    /// doesn't affect subsequent reads (e.g. modification time) -- may be
+    /// faster than [`sync_all`](Self::sync_all) on platforms where that
+    /// distinction exists. See `std::fs::File::sync_data`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn sync_data(&mut self) -> io::Result<()> {
+        std::future::poll_fn(|cx| {
+            self.poll_dispatch(cx, |f| {
+                let result = f.sync_data();
+                (f, Op::SyncData(result))
+            })
+        })
+        .await
+    }
+
+    /// Duplicates this file (`dup(2)`-equivalent -- an independent fd
+    /// onto the same underlying open file description, same guarantee
+    /// `std::fs::File::try_clone` gives), by handing the request to the
+    /// blocking pool the same way every other operation here does.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn try_clone(&mut self) -> io::Result<File> {
+        let cloned = std::future::poll_fn(|cx| self.poll_try_clone(cx)).await?;
+        Ok(File {
+            state: State::Idle(cloned),
+            max_buf_size: self.max_buf_size,
+        })
+    }
+
+    /// Hands this file back out as a plain, blocking `std::fs::File` --
+    /// only if nothing is currently in flight on it (`Busy`) and it
+    /// hasn't been [`Poisoned`](State::Poisoned) by a previous panic;
+    /// `Err(self)` otherwise, so the caller can decide whether to wait
+    /// (e.g. by awaiting an in-progress operation to completion first)
+    /// or give up rather than losing the file. Unlike every other method
+    /// here, this needs no `spawn_blocking` round trip at all -- taking
+    /// the already-idle `std::fs::File` out is itself non-blocking.
+    pub fn try_into_std(mut self) -> Result<std::fs::File, Self> {
+        match std::mem::replace(&mut self.state, State::Poisoned) {
+            State::Idle(std_file) => Ok(std_file),
+            state @ (State::Busy(_) | State::Poisoned) => {
+                self.state = state;
+                Err(self)
+            }
+        }
+    }
+
+    /// Shared `drain-then-start` dispatch for the `&mut self` metadata
+    /// operations above -- same shape as `poll_read`/`poll_write`/
+    /// `poll_seek`'s own loops, just generic over which blocking closure
+    /// to run and which `Op` variant to unwrap. Only starts a fresh
+    /// dispatch from the `Idle` arm (mirroring `poll_read` etc.); a
+    /// `Busy` re-poll just re-polls the same in-flight operation, so
+    /// `dispatch` -- freshly constructed by the caller on every poll,
+    /// same as `poll_fn`'s own closure is -- is silently dropped unused
+    /// in that case.
+    fn poll_dispatch(
+        &mut self,
+        cx: &mut Context<'_>,
+        dispatch: impl FnOnce(std::fs::File) -> (std::fs::File, Op) + Send + 'static,
+    ) -> Poll<io::Result<()>> {
+        // `dispatch` only actually starts once state is genuinely idle --
+        // which may not be the very first loop iteration, if `state` is
+        // `Busy` with a leftover operation from an earlier cancelled
+        // future that has to drain first (see `poll_read`'s docs on
+        // `Busy`). Wrapped in `Option` so `.take()` can hand it out from
+        // inside the loop without the borrow checker treating it as
+        // reachable more than once -- it never actually is: state only
+        // transitions into `Idle` once per call, after which this branch
+        // isn't reached again.
+        let mut dispatch = Some(dispatch);
+        loop {
+            if let State::Idle(_) = &self.state {
+                let std_file = Self::take_idle(&mut self.state);
+                let dispatch = dispatch.take().expect("Idle reached only once per call");
+                self.state = State::Busy(crate::spawn_blocking(move || dispatch(std_file)));
+            }
+            match &mut self.state {
+                State::Idle(_) => unreachable!("just started a dispatch above"),
+                State::Busy(handle) => match Pin::new(handle).poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(_join_err)) => {
+                        self.state = State::Poisoned;
+                        return Poll::Ready(Err(poisoned_error()));
+                    }
+                    Poll::Ready(Ok((std_file, op))) => {
+                        self.state = State::Idle(std_file);
+                        match op {
+                            Op::SetLen(result)
+                            | Op::SetPermissions(result)
+                            | Op::SyncAll(result)
+                            | Op::SyncData(result) => return Poll::Ready(result),
+                            Op::Read(_) | Op::Write(_) | Op::Seek(_) | Op::TryClone(_) => continue,
+                        }
+                    }
+                },
+                State::Poisoned => return Poll::Ready(Err(poisoned_error())),
+            }
+        }
+    }
+
+    /// [`poll_dispatch`](Self::poll_dispatch)'s sibling for
+    /// [`try_clone`](Self::try_clone) -- same `drain-then-start` shape,
+    /// just unwrapping `Op::TryClone` instead of the plain-`()` variants.
+    fn poll_try_clone(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<std::fs::File>> {
+        loop {
+            if let State::Idle(_) = &self.state {
+                let std_file = Self::take_idle(&mut self.state);
+                self.state = State::Busy(crate::spawn_blocking(move || {
+                    let cloned = std_file.try_clone();
+                    (std_file, Op::TryClone(cloned))
+                }));
+            }
+            match &mut self.state {
+                State::Idle(_) => unreachable!("just started a dispatch above"),
+                State::Busy(handle) => match Pin::new(handle).poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(_join_err)) => {
+                        self.state = State::Poisoned;
+                        return Poll::Ready(Err(poisoned_error()));
+                    }
+                    Poll::Ready(Ok((std_file, op))) => {
+                        self.state = State::Idle(std_file);
+                        match op {
+                            Op::TryClone(result) => return Poll::Ready(result),
+                            Op::Read(_)
+                            | Op::Write(_)
+                            | Op::Seek(_)
+                            | Op::SetLen(_)
+                            | Op::SetPermissions(_)
+                            | Op::SyncAll(_)
+                            | Op::SyncData(_) => continue,
+                        }
+                    }
+                },
+                State::Poisoned => return Poll::Ready(Err(poisoned_error())),
+            }
+        }
+    }
 }
 
 impl AsyncRead for File {
@@ -128,7 +353,7 @@ impl AsyncRead for File {
             match &mut self.state {
                 State::Idle(_) => {
                     let mut std_file = Self::take_idle(&mut self.state);
-                    let want = buf.remaining();
+                    let want = buf.remaining().min(self.max_buf_size);
                     self.state = State::Busy(crate::spawn_blocking(move || {
                         let mut chunk = vec![0u8; want];
                         let result = std::io::Read::read(&mut std_file, &mut chunk).map(|n| {
@@ -153,12 +378,18 @@ impl AsyncRead for File {
                                 return Poll::Ready(Ok(()));
                             }
                             Op::Read(Err(e)) => return Poll::Ready(Err(e)),
-                            // A leftover write/seek from a previously
+                            // A leftover operation from a previously
                             // cancelled future -- already drained by the
                             // `Idle` transition above; loop around to
                             // actually start the read now that the file
                             // is free again.
-                            Op::Write(_) | Op::Seek(_) => continue,
+                            Op::Write(_)
+                            | Op::Seek(_)
+                            | Op::SetLen(_)
+                            | Op::SetPermissions(_)
+                            | Op::SyncAll(_)
+                            | Op::SyncData(_)
+                            | Op::TryClone(_) => continue,
                         }
                     }
                 },
@@ -180,8 +411,14 @@ impl AsyncWrite for File {
                     let mut std_file = Self::take_idle(&mut self.state);
                     // Copied into an owned buffer -- `spawn_blocking`'s
                     // closure needs `'static` data, and `buf` only lives
-                    // as long as this one `poll_write` call.
-                    let data = buf.to_vec();
+                    // as long as this one `poll_write` call. Capped at
+                    // `max_buf_size`, same as `poll_read`'s own chunk
+                    // size -- callers writing more than that just get a
+                    // short write and loop (`AsyncWriteExt::write_all`
+                    // already does), rather than tying up a blocking-pool
+                    // thread for an unbounded amount of time.
+                    let n = buf.len().min(self.max_buf_size);
+                    let data = buf[..n].to_vec();
                     self.state = State::Busy(crate::spawn_blocking(move || {
                         let result = std::io::Write::write(&mut std_file, &data);
                         (std_file, Op::Write(result))
@@ -197,7 +434,13 @@ impl AsyncWrite for File {
                         self.state = State::Idle(std_file);
                         match op {
                             Op::Write(result) => return Poll::Ready(result),
-                            Op::Read(_) | Op::Seek(_) => continue,
+                            Op::Read(_)
+                            | Op::Seek(_)
+                            | Op::SetLen(_)
+                            | Op::SetPermissions(_)
+                            | Op::SyncAll(_)
+                            | Op::SyncData(_)
+                            | Op::TryClone(_) => continue,
                         }
                     }
                 },
@@ -248,7 +491,13 @@ impl AsyncSeek for File {
                         self.state = State::Idle(std_file);
                         match op {
                             Op::Seek(result) => return Poll::Ready(result),
-                            Op::Read(_) | Op::Write(_) => continue,
+                            Op::Read(_)
+                            | Op::Write(_)
+                            | Op::SetLen(_)
+                            | Op::SetPermissions(_)
+                            | Op::SyncAll(_)
+                            | Op::SyncData(_)
+                            | Op::TryClone(_) => continue,
                         }
                     }
                 },

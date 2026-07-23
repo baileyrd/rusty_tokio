@@ -109,3 +109,110 @@ fn generic_copy_works_between_two_files() {
     std::fs::remove_file(&src_path).unwrap();
     std::fs::remove_file(&dst_path).unwrap();
 }
+
+#[test]
+fn set_len_truncates_and_extends() {
+    let path = temp_path("set_len");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"0123456789").await.unwrap();
+
+        file.set_len(4).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4);
+
+        file.set_len(8).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn set_permissions_applies_to_the_underlying_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("set_permissions");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(0o600);
+        file.set_permissions(perm).await.unwrap();
+    });
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn sync_all_and_sync_data_do_not_error_on_a_writable_file() {
+    let path = temp_path("sync");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"durability").await.unwrap();
+        file.sync_all().await.unwrap();
+        file.sync_data().await.unwrap();
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn try_clone_gives_an_independent_handle_onto_the_same_file() {
+    let path = temp_path("try_clone");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"shared-").await.unwrap();
+
+        let mut cloned = file.try_clone().await.unwrap();
+        // Both handles share one cursor (same open file description,
+        // like `std::fs::File::try_clone`/`dup(2)`) -- a write through
+        // the clone continues from wherever the original's cursor left
+        // off, rather than starting over at offset 0.
+        cloned.write_all(b"continued").await.unwrap();
+    });
+    let contents = std::fs::read(&path).unwrap();
+    assert_eq!(contents, b"shared-continued");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn try_into_std_succeeds_when_idle() {
+    let path = temp_path("try_into_std");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"idle now").await.unwrap();
+
+        // Idle (the write above already completed) -- should succeed.
+        // `File` isn't `Debug`, so `Result::unwrap` doesn't apply to the
+        // `Err(Self)` case -- go through `Option` instead.
+        let std_file = file.try_into_std().ok().expect("file should be idle");
+        drop(std_file);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn max_buf_size_defaults_then_can_be_changed_and_caps_a_single_read() {
+    let path = temp_path("max_buf_size");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        assert_eq!(file.max_buf_size(), 2 * 1024 * 1024);
+        file.write_all(b"0123456789").await.unwrap();
+        drop(file);
+
+        let mut file = File::open(&path).await.unwrap();
+        file.set_max_buf_size(4);
+        assert_eq!(file.max_buf_size(), 4);
+
+        let mut buf = [0u8; 10];
+        let n = file.read(&mut buf).await.unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&buf[..4], b"0123");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
