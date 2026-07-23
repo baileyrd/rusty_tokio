@@ -141,6 +141,18 @@ impl Command {
         self
     }
 
+    /// Borrows the inner [`std::process::Command`] -- an escape hatch for
+    /// any std builder option this wrapper doesn't cover itself.
+    pub fn as_std(&self) -> &std::process::Command {
+        &self.inner
+    }
+
+    /// Mutably borrows the inner [`std::process::Command`] -- same escape
+    /// hatch as [`as_std`](Self::as_std), but for setters.
+    pub fn as_std_mut(&mut self) -> &mut std::process::Command {
+        &mut self.inner
+    }
+
     /// Spawns the child. `fork`/`exec` themselves run synchronously,
     /// right here -- like tokio's own `Command::spawn`, this crate treats
     /// process creation as fast enough not to need `spawn_blocking`
