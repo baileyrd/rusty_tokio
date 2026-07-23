@@ -1,6 +1,9 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
-use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo, TryCloneIo};
+use super::reactor::{
+    poll_io, ready_io, Interest as ReactorInterest, Reactor, ScheduledIo, TryCloneIo,
+};
 use super::socket::{self, from_platform_err};
+use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -56,13 +59,26 @@ impl UnixListener {
     }
 
     pub async fn accept(&self) -> io::Result<(UnixStream, Option<PathBuf>)> {
-        let (stream, peer) = ready_io(&self.io, Interest::Read, || {
+        std::future::poll_fn(|cx| self.poll_accept(cx)).await
+    }
+
+    /// Non-`async fn` form of [`accept`](Self::accept), for a caller
+    /// implementing its own `Future`/poll loop.
+    pub fn poll_accept(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<(UnixStream, Option<PathBuf>)>> {
+        let accepted = match poll_io(&self.io, ReactorInterest::Read, cx, || {
             self.inner.accept().map_err(from_platform_err)
-        })
-        .await?;
-        stream.set_nonblocking(true).map_err(from_platform_err)?;
-        let stream = UnixStream::from_accepted(stream, self.reactor.clone())?;
-        Ok((stream, peer))
+        }) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+        Poll::Ready(accepted.and_then(|(stream, peer)| {
+            stream.set_nonblocking(true).map_err(from_platform_err)?;
+            let stream = UnixStream::from_accepted(stream, self.reactor.clone())?;
+            Ok((stream, peer))
+        }))
     }
 
     pub fn local_addr(&self) -> io::Result<Option<PathBuf>> {
@@ -163,7 +179,7 @@ impl UnixStream {
         let inner = PlatformUnixStream::from(fd);
         // Same non-blocking-connect-completes-asynchronously reasoning
         // as `TcpStream::connect`.
-        ready_io(&io, Interest::Write, || {
+        ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_fd())
         })
         .await?;
@@ -176,14 +192,14 @@ impl UnixStream {
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Read, || {
+        ready_io(&self.io, ReactorInterest::Read, || {
             socket::read(self.inner.as_raw_fd(), buf)
         })
         .await
     }
 
     pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Write, || {
+        ready_io(&self.io, ReactorInterest::Write, || {
             socket::write(self.inner.as_raw_fd(), buf)
         })
         .await
@@ -224,14 +240,58 @@ impl UnixStream {
         self.inner.local_addr().map_err(from_platform_err)
     }
 
+    /// Waits for this stream to become readable -- see
+    /// [`super::TcpStream::readable`], identical reasoning here.
+    pub async fn readable(&self) -> io::Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    pub async fn writable(&self) -> io::Result<()> {
+        self.ready(Interest::WRITABLE).await.map(|_| ())
+    }
+
+    /// Resolves once *any* of `interest`'s requested directions is
+    /// ready, reporting exactly which one(s) actually are.
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        std::future::poll_fn(|cx| self.poll_ready(interest, cx)).await
+    }
+
+    /// Non-`async fn` form of [`ready`](Self::ready).
+    pub fn poll_ready(&self, interest: Interest, cx: &mut Context<'_>) -> Poll<io::Result<Ready>> {
+        readiness::poll_ready(&self.io, interest, cx)
+    }
+
+    /// Non-`async fn` form of [`readable`](Self::readable).
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Read, cx).map(Ok)
+    }
+
+    /// Non-`async fn` form of [`writable`](Self::writable).
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Write, cx).map(Ok)
+    }
+
+    /// Runs `f` (the caller's own non-blocking read/write against this
+    /// stream's fd) once `interest` is ready, clearing that cached
+    /// readiness if `f` reports `WouldBlock` -- see
+    /// [`super::TcpStream::try_io`] for the same pattern, identical
+    /// reasoning here.
+    pub fn try_io<R>(
+        &self,
+        interest: Interest,
+        f: impl FnOnce() -> io::Result<R>,
+    ) -> io::Result<R> {
+        readiness::try_io(&self.io, interest, f)
+    }
+
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        poll_io(&self.io, Interest::Read, cx, || {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
             socket::read(self.inner.as_raw_fd(), buf)
         })
     }
 
     fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        poll_io(&self.io, Interest::Write, cx, || {
+        poll_io(&self.io, ReactorInterest::Write, cx, || {
             socket::write(self.inner.as_raw_fd(), buf)
         })
     }

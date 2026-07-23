@@ -1,8 +1,10 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
 use super::reactor::{
-    poll_io, ready_io, AsRawIo, Interest, OwnedIo, Reactor, ScheduledIo, TryCloneIo,
+    poll_io, ready_io, AsRawIo, Interest as ReactorInterest, OwnedIo, Reactor, ScheduledIo,
+    TryCloneIo,
 };
 use super::socket::{self, from_platform_err};
+use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -61,20 +63,30 @@ impl TcpListener {
     }
 
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
-        let (stream, peer) = ready_io(&self.io, Interest::Read, || {
-            self.inner.accept().map_err(from_platform_err)
-        })
-        .await?;
-        // A freshly accepted fd is born blocking regardless of the
-        // listener's own non-blocking state; flip it before it's ever
-        // touched.
-        stream.set_nonblocking(true).map_err(from_platform_err)?;
-        let stream = TcpStream::from_accepted(stream, self.reactor.clone())?;
-        Ok((stream, peer))
+        std::future::poll_fn(|cx| self.poll_accept(cx)).await
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr().map_err(from_platform_err)
+    }
+
+    /// Non-`async fn` form of [`accept`](Self::accept), for a caller
+    /// implementing its own `Future`/poll loop.
+    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+        let accepted = match poll_io(&self.io, ReactorInterest::Read, cx, || {
+            self.inner.accept().map_err(from_platform_err)
+        }) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+        Poll::Ready(accepted.and_then(|(stream, peer)| {
+            // A freshly accepted fd is born blocking regardless of the
+            // listener's own non-blocking state; flip it before it's
+            // ever touched, same as `accept` above.
+            stream.set_nonblocking(true).map_err(from_platform_err)?;
+            let stream = TcpStream::from_accepted(stream, self.reactor.clone())?;
+            Ok((stream, peer))
+        }))
     }
 
     /// Adopts an already-bound-and-listening `std` listener -- e.g. one
@@ -248,7 +260,7 @@ impl TcpStream {
         // A non-blocking connect completes asynchronously; the socket
         // becoming writable is the signal to check whether it actually
         // succeeded.
-        ready_io(&io, Interest::Write, || {
+        ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
@@ -288,14 +300,14 @@ impl TcpStream {
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Read, || {
+        ready_io(&self.io, ReactorInterest::Read, || {
             socket::read(self.inner.as_raw_io(), buf)
         })
         .await
     }
 
     pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        ready_io(&self.io, Interest::Write, || {
+        ready_io(&self.io, ReactorInterest::Write, || {
             socket::write(self.inner.as_raw_io(), buf)
         })
         .await
@@ -340,14 +352,63 @@ impl TcpStream {
         self.inner.local_addr().map_err(from_platform_err)
     }
 
+    /// Waits for this stream to become readable -- see this crate's
+    /// `io` module docs (or [`ready`](Self::ready)) for using this
+    /// together with your own non-blocking I/O via
+    /// [`try_io`](Self::try_io) instead of the inherent
+    /// `read`/`write`/`AsyncRead`/`AsyncWrite` methods.
+    pub async fn readable(&self) -> io::Result<()> {
+        self.ready(Interest::READABLE).await.map(|_| ())
+    }
+
+    pub async fn writable(&self) -> io::Result<()> {
+        self.ready(Interest::WRITABLE).await.map(|_| ())
+    }
+
+    /// Resolves once *any* of `interest`'s requested directions is
+    /// ready, reporting exactly which one(s) actually are.
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        std::future::poll_fn(|cx| self.poll_ready(interest, cx)).await
+    }
+
+    /// Non-`async fn` form of [`ready`](Self::ready).
+    pub fn poll_ready(&self, interest: Interest, cx: &mut Context<'_>) -> Poll<io::Result<Ready>> {
+        readiness::poll_ready(&self.io, interest, cx)
+    }
+
+    /// Non-`async fn` form of [`readable`](Self::readable).
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Read, cx).map(Ok)
+    }
+
+    /// Non-`async fn` form of [`writable`](Self::writable).
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        super::reactor::poll_ready(&self.io, ReactorInterest::Write, cx).map(Ok)
+    }
+
+    /// Runs `f` (the caller's own non-blocking read/write against this
+    /// stream's fd, via [`std::os::fd::AsRawFd`]/
+    /// [`std::os::windows::io::AsRawSocket`]) once `interest` is ready,
+    /// clearing that cached readiness if `f` reports `WouldBlock` --
+    /// see [`readable`](Self::readable)/[`writable`](Self::writable) to
+    /// wait for readiness first, and this crate's `readiness` module
+    /// docs for why that clearing matters.
+    pub fn try_io<R>(
+        &self,
+        interest: Interest,
+        f: impl FnOnce() -> io::Result<R>,
+    ) -> io::Result<R> {
+        readiness::try_io(&self.io, interest, f)
+    }
+
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        poll_io(&self.io, Interest::Read, cx, || {
+        poll_io(&self.io, ReactorInterest::Read, cx, || {
             socket::read(self.inner.as_raw_io(), buf)
         })
     }
 
     fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        poll_io(&self.io, Interest::Write, cx, || {
+        poll_io(&self.io, ReactorInterest::Write, cx, || {
             socket::write(self.inner.as_raw_io(), buf)
         })
     }
@@ -691,7 +752,7 @@ impl TcpSocket {
         // A non-blocking connect completes asynchronously; the socket
         // becoming writable is the signal to check whether it actually
         // succeeded -- same as `TcpStream::connect`.
-        ready_io(&io, Interest::Write, || {
+        ready_io(&io, ReactorInterest::Write, || {
             socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
