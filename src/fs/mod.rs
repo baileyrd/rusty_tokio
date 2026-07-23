@@ -1,4 +1,5 @@
-//! Async filesystem I/O: [`File`], [`OpenOptions`], and [`DirBuilder`].
+//! Async filesystem I/O: [`File`], [`OpenOptions`], [`DirBuilder`], and
+//! [`read_dir`]/[`ReadDir`]/[`DirEntry`].
 //!
 //! A regular file can't be registered with `epoll`/`kevent`'s readiness
 //! model the way a socket can -- from the kernel's point of view a file
@@ -19,6 +20,9 @@ use std::io;
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+mod read_dir;
+pub use read_dir::{read_dir, DirEntry, ReadDir};
 
 /// The result of whichever operation was in flight, carried back
 /// alongside the `std::fs::File` itself once the blocking closure
