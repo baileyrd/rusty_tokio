@@ -333,3 +333,48 @@ fn dropping_the_enter_guard_restores_the_previous_ambient_runtime() {
         rusty_tokio::time::sleep(Duration::from_millis(1)).await;
     });
 }
+
+#[test]
+fn try_current_detailed_reports_missing_context_off_any_runtime() {
+    // A dedicated OS thread guarantees no ambient runtime, regardless
+    // of what this test harness's own thread might otherwise have set
+    // up (or leaked from an earlier test in the same process).
+    let result = std::thread::spawn(rusty_tokio::Handle::try_current_detailed)
+        .join()
+        .unwrap();
+    let Err(err) = result else {
+        panic!("expected an error off any runtime");
+    };
+    assert!(err.is_missing_context());
+    assert!(!err.is_thread_local_destroyed());
+    assert!(!err.is_rt_shutdown_err());
+}
+
+#[test]
+fn try_current_detailed_succeeds_with_an_ambient_runtime() {
+    let rt = Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let handle = rusty_tokio::Handle::try_current_detailed().unwrap();
+    assert!(handle.metrics().num_workers() >= 1);
+}
+
+#[test]
+fn try_current_detailed_reports_shutdown_once_the_runtime_starts_shutting_down() {
+    let rt = Runtime::new().unwrap();
+    let guard = rt.enter();
+    // `guard` holds its own cloned `Arc<Shared>`, so dropping `rt` here
+    // still runs `Runtime::drop`'s own shutdown logic (marking
+    // `shutting_down`) even though the underlying `Shared` itself stays
+    // alive a little longer via that clone.
+    drop(rt);
+
+    let result = rusty_tokio::Handle::try_current_detailed();
+    let Err(err) = result else {
+        panic!("expected an error after the runtime started shutting down");
+    };
+    assert!(err.is_rt_shutdown_err());
+    assert!(!err.is_missing_context());
+    assert!(!err.is_thread_local_destroyed());
+
+    drop(guard);
+}
