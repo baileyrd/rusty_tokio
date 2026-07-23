@@ -405,6 +405,35 @@ pub(crate) fn write(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// Genuine scatter-read via `readv(2)` -- fills as many of `bufs` as one
+/// kernel call returns data for, rather than the "just the first buffer"
+/// shortcut a naive vectored read might take.
+pub(crate) fn readv(fd: RawFd, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+    let iovcnt = bufs.len().min(c_int::MAX as usize) as c_int;
+    // SAFETY: `IoSliceMut` is guaranteed to have the same memory layout
+    // as `iovec` on Unix (the whole reason it exists); `bufs` is valid
+    // for `iovcnt` entries for the call's duration; `fd` is caller-owned
+    // and open.
+    let n = unsafe { libc::readv(fd, bufs.as_ptr().cast(), iovcnt) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// The write-side counterpart of [`readv`], via `writev(2)`.
+pub(crate) fn writev(fd: RawFd, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+    let iovcnt = bufs.len().min(c_int::MAX as usize) as c_int;
+    // SAFETY: see `readv` above -- `IoSlice` has the identical guarantee.
+    let n = unsafe { libc::writev(fd, bufs.as_ptr().cast(), iovcnt) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
 /// Like [`read`], but via `recv(2)` with `MSG_PEEK` -- the bytes stay in
 /// the socket's receive queue for the next real `read`/`recv` call.
 pub(crate) fn peek(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {

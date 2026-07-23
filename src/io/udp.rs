@@ -217,6 +217,41 @@ impl UdpSocket {
         readiness::try_io(&self.io, interest, f)
     }
 
+    /// Sends to `addr` without waiting, failing immediately (with
+    /// `WouldBlock`) if the socket isn't ready to accept more right
+    /// now.
+    pub fn try_send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.try_io(Interest::WRITABLE, || {
+            self.inner.send_to(buf, addr).map_err(from_platform_err)
+        })
+    }
+
+    /// Receives without waiting, failing immediately (with
+    /// `WouldBlock`) if no datagram is available yet.
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.try_io(Interest::READABLE, || {
+            self.inner.recv_from(buf).map_err(from_platform_err)
+        })
+    }
+
+    /// Sends to whichever peer [`connect`](Self::connect) fixed,
+    /// without waiting -- see [`try_send_to`](Self::try_send_to) for
+    /// the failure shape.
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.try_io(Interest::WRITABLE, || {
+            socket::write(self.inner.as_raw_io(), buf)
+        })
+    }
+
+    /// Receives from whichever peer [`connect`](Self::connect) fixed,
+    /// without waiting -- see [`try_recv_from`](Self::try_recv_from)
+    /// for the failure shape.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_io(Interest::READABLE, || {
+            socket::read(self.inner.as_raw_io(), buf)
+        })
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr().map_err(from_platform_err)
     }
