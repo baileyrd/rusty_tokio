@@ -633,6 +633,24 @@ impl TcpSocket {
         socket::recv_buffer_size(self.fd.as_raw_io())
     }
 
+    /// `SO_BINDTODEVICE` -- binds this socket to a specific network
+    /// interface by name (e.g. `b"eth0"`), so its traffic only goes over
+    /// that interface regardless of routing table entries. `None` clears
+    /// a previous binding. Linux-only: no macOS/BSD equivalent exists at
+    /// all, unlike every other option above. Typically needs
+    /// `CAP_NET_ADMIN` to set.
+    #[cfg(target_os = "linux")]
+    pub fn bind_device(&self, interface: Option<&[u8]>) -> io::Result<()> {
+        socket::set_bind_device(self.fd.as_raw_io(), interface)
+    }
+
+    /// The reverse of [`bind_device`](Self::bind_device) -- `None` if
+    /// this socket isn't currently bound to a specific interface.
+    #[cfg(target_os = "linux")]
+    pub fn device(&self) -> io::Result<Option<Vec<u8>>> {
+        socket::bind_device(self.fd.as_raw_io())
+    }
+
     /// Binds to `addr`. Doesn't start listening yet -- see
     /// [`listen`](Self::listen), a separate step so options can still be
     /// set (or read back) on the bound-but-not-yet-listening socket in

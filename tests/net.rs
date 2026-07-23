@@ -278,3 +278,19 @@ fn tcp_socket_raw_fd_roundtrip_still_binds_and_listens() {
         server.await.unwrap();
     });
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn udp_socket_bind_device_set_and_read_back_then_cleared() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert_eq!(socket.device().unwrap(), None);
+
+        socket.bind_device(Some(b"lo")).unwrap();
+        assert_eq!(socket.device().unwrap().as_deref(), Some(&b"lo"[..]));
+
+        socket.bind_device(None).unwrap();
+        assert_eq!(socket.device().unwrap(), None);
+    });
+}

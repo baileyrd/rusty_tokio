@@ -470,6 +470,54 @@ pub(crate) fn recv_buffer_size(fd: RawFd) -> io::Result<u32> {
     Ok(getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF)? as u32)
 }
 
+/// `SO_BINDTODEVICE` -- Linux-only (no macOS/BSD equivalent at all, unlike
+/// every other option in this file), binds a socket to a specific network
+/// interface by name (e.g. `b"eth0"`) so its traffic only goes over that
+/// interface regardless of routing table entries. `interface: None` clears
+/// a previous binding. Typically needs `CAP_NET_ADMIN` to set.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_bind_device(fd: RawFd, interface: Option<&[u8]>) -> io::Result<()> {
+    let bytes = interface.unwrap_or(&[]);
+    // SAFETY: `bytes` is a valid, exclusively-borrowed byte slice the
+    // kernel only reads for the call's duration; `fd` is caller-owned.
+    cvt(unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            bytes.as_ptr().cast(),
+            bytes.len() as socklen_t,
+        )
+    })?;
+    Ok(())
+}
+
+/// The reverse of [`set_bind_device`] -- `None` if the socket isn't
+/// currently bound to a specific interface.
+#[cfg(target_os = "linux")]
+pub(crate) fn bind_device(fd: RawFd) -> io::Result<Option<Vec<u8>>> {
+    // IFNAMSIZ (16) is the kernel's own hard cap on interface name
+    // length, name included nul terminator.
+    let mut buf = [0u8; libc::IFNAMSIZ];
+    let mut len = buf.len() as socklen_t;
+    // SAFETY: `&mut buf`/`&mut len` are valid, exclusively borrowed
+    // out-params the kernel fills; `fd` is caller-owned.
+    cvt(unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+        )
+    })?;
+    if len == 0 || buf[0] == 0 {
+        return Ok(None);
+    }
+    let name_len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(Some(buf[..name_len].to_vec()))
+}
+
 /// Flips `fd`'s `O_NONBLOCK` flag via `fcntl(2)` -- unlike every socket
 /// type in this module (each has its own concrete `set_nonblocking`,
 /// either from rustils or, on macOS at creation time, hand-rolled), a
