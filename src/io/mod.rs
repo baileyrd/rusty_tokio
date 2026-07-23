@@ -76,7 +76,8 @@ pub use tcp::{
 pub use udp::{UdpSocket, MAX_UDP_DATAGRAM_SIZE};
 #[cfg(unix)]
 pub use unix::{
-    OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixStream, UnixWriteHalf,
+    gid_t, pid_t, uid_t, OwnedUnixReadHalf, OwnedUnixWriteHalf, UCred, UnixListener, UnixReadHalf,
+    UnixStream, UnixWriteHalf,
 };
 #[cfg(unix)]
 pub use unix_datagram::UnixDatagram;
