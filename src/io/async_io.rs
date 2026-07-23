@@ -641,6 +641,28 @@ pub trait AsyncSeekExt: AsyncSeek {
     {
         async move { std::future::poll_fn(|cx| Pin::new(&mut *self).poll_seek(cx, pos)).await }
     }
+
+    /// The current position, without moving it -- sugar for
+    /// `seek(SeekFrom::Current(0))`.
+    fn stream_position(&mut self) -> impl Future<Output = io::Result<u64>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        self.seek(io::SeekFrom::Current(0))
+    }
+
+    /// Seeks back to the start of the stream -- sugar for
+    /// `seek(SeekFrom::Start(0))`, discarding the (always-`0`) returned
+    /// position.
+    fn rewind(&mut self) -> impl Future<Output = io::Result<()>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            self.seek(io::SeekFrom::Start(0)).await?;
+            Ok(())
+        }
+    }
 }
 
 impl<T: AsyncSeek + ?Sized> AsyncSeekExt for T {}
@@ -757,9 +779,59 @@ pub trait AsyncBufReadExt: AsyncBufRead {
     {
         super::buffered::Lines::new(self)
     }
+
+    /// Returns the reader's internal buffer, filling it first if it's
+    /// currently empty -- a standalone future wrapping
+    /// [`poll_fill_buf`](AsyncBufRead::poll_fill_buf) directly, for
+    /// callers that want the peeked bytes without also committing to
+    /// consuming up to some delimiter the way [`read_until`](Self::read_until)/
+    /// [`read_line`](Self::read_line) do.
+    fn fill_buf(&mut self) -> FillBuf<'_, Self>
+    where
+        Self: Unpin,
+    {
+        FillBuf { reader: Some(self) }
+    }
 }
 
 impl<T: AsyncBufRead + ?Sized> AsyncBufReadExt for T {}
+
+/// Returned by [`AsyncBufReadExt::fill_buf`].
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct FillBuf<'a, R: ?Sized> {
+    reader: Option<&'a mut R>,
+}
+
+impl<'a, R: AsyncBufRead + ?Sized + Unpin> Future for FillBuf<'a, R> {
+    type Output = io::Result<&'a [u8]>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&'a [u8]>> {
+        let this = self.get_mut();
+        let reader = this
+            .reader
+            .take()
+            .expect("polled FillBuf after it already completed");
+        match Pin::new(&mut *reader).poll_fill_buf(cx) {
+            Poll::Ready(Ok(slice)) => {
+                // Safety: `poll_fill_buf`'s signature only ties the
+                // returned slice's lifetime to the `&mut R` reborrow
+                // passed to this one call, but the bytes it actually
+                // points at live as long as the `&'a mut R` this future
+                // was constructed from -- extending the lifetime here
+                // just makes that already-true fact visible to the type
+                // system, the same justification real tokio's own
+                // `FillBuf` future gives for this identical transmute.
+                let slice: &'a [u8] = unsafe { std::mem::transmute(slice) };
+                Poll::Ready(Ok(slice))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => {
+                this.reader = Some(reader);
+                Poll::Pending
+            }
+        }
+    }
+}
 
 /// An in-memory sink -- never blocks, so every operation is trivially
 /// `Ready`. Handy as a `copy`/`AsyncWriteExt` target in tests, or any

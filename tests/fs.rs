@@ -72,6 +72,58 @@ fn seek_moves_the_read_cursor_on_the_same_open_file() {
 }
 
 #[test]
+fn stream_position_reports_the_cursor_without_moving_it() {
+    let path = temp_path("stream-position");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"0123456789").await.unwrap();
+        drop(file);
+
+        let mut file = File::open(&path).await.unwrap();
+        assert_eq!(file.stream_position().await.unwrap(), 0);
+
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"0123");
+
+        // Reading a further two bytes right after should pick up where
+        // the position report said it was, not from the start.
+        assert_eq!(file.stream_position().await.unwrap(), 4);
+        let mut buf = [0u8; 2];
+        file.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"45");
+        assert_eq!(file.stream_position().await.unwrap(), 6);
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn rewind_seeks_back_to_the_start() {
+    let path = temp_path("rewind");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut file = File::create(&path).await.unwrap();
+        file.write_all(b"0123456789").await.unwrap();
+        drop(file);
+
+        let mut file = File::open(&path).await.unwrap();
+        let mut buf = [0u8; 6];
+        file.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"012345");
+        assert_eq!(file.stream_position().await.unwrap(), 6);
+
+        file.rewind().await.unwrap();
+        assert_eq!(file.stream_position().await.unwrap(), 0);
+
+        let mut buf = [0u8; 10];
+        file.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"0123456789");
+    });
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
 fn open_a_missing_file_reports_not_found() {
     let path = temp_path("does-not-exist");
     let rt = Runtime::new().unwrap();
