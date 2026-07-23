@@ -164,6 +164,17 @@ pub(crate) struct Shared {
     /// of each (its single "worker 0"), same as `local` itself.
     steal_counts: Vec<AtomicU64>,
     park_counts: Vec<AtomicU64>,
+    /// Incremented once when a worker parks and again when it unparks
+    /// (see [`Shared::park`]) -- an odd value means the worker is
+    /// currently parked, even means active. Backs
+    /// `RuntimeMetrics::worker_park_unpark_count`.
+    park_unpark_counts: Vec<AtomicU64>,
+    /// Cumulative nanoseconds each worker has spent actually running
+    /// tasks (see [`Shared::add_busy_duration`]), since the runtime
+    /// started -- as `u64` nanos rather than `Duration` directly, since
+    /// there's no `AtomicDuration`. Backs
+    /// `RuntimeMetrics::worker_total_busy_duration`.
+    busy_duration_nanos: Vec<AtomicU64>,
     pub(crate) reactor: Arc<Reactor>,
     pub(crate) timer: Arc<TimerDriver>,
     pub(crate) blocking_pool: BlockingPool,
@@ -241,15 +252,27 @@ impl Shared {
     /// Sleep until woken by a new task, or until the timeout elapses
     /// (the timeout is a safety net, not the primary wake path -- it
     /// bounds how long a worker can go without re-checking `shutdown`).
-    /// `idx` is only used to attribute the park to the right
-    /// `RuntimeMetrics::worker_park_count` counter -- every worker
-    /// shares the same `park_lock`/`park_condvar`.
+    /// `idx` is only used to attribute the park to the right per-worker
+    /// counters -- every worker shares the same `park_lock`/
+    /// `park_condvar`.
     fn park(&self, idx: usize) {
         self.park_counts[idx].fetch_add(1, Ordering::Relaxed);
+        self.park_unpark_counts[idx].fetch_add(1, Ordering::Relaxed);
         let guard = self.park_lock.lock().unwrap();
         let _ = self
             .park_condvar
             .wait_timeout(guard, std::time::Duration::from_millis(50));
+        self.park_unpark_counts[idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Adds `elapsed` (how long a single [`task::Task::run`] call just
+    /// took) to `worker`'s cumulative busy time -- called right around
+    /// each task poll rather than batched over a whole unparked stretch,
+    /// so `RuntimeMetrics::worker_total_busy_duration` reflects work
+    /// still in progress rather than lagging until the worker's next
+    /// park.
+    pub(crate) fn add_busy_duration(&self, worker: usize, elapsed: Duration) {
+        self.busy_duration_nanos[worker].fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn wake_all_parked(&self) {
@@ -367,6 +390,14 @@ impl Shared {
 
     pub(crate) fn worker_park_count(&self, worker: usize) -> u64 {
         self.park_counts[worker].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn worker_park_unpark_count(&self, worker: usize) -> u64 {
+        self.park_unpark_counts[worker].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn worker_total_busy_duration(&self, worker: usize) -> Duration {
+        Duration::from_nanos(self.busy_duration_nanos[worker].load(Ordering::Relaxed))
     }
 
     pub(crate) fn num_blocking_threads(&self) -> usize {
@@ -551,6 +582,8 @@ impl Builder {
         };
         let steal_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
         let park_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
+        let park_unpark_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
+        let busy_duration_nanos = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
 
         // For the multi-threaded flavor, each worker's `Worker<Arc<Task>>`
         // has to be created up front (to hand out its `Stealer` for
@@ -606,6 +639,8 @@ impl Builder {
             drain_condvar: Condvar::new(),
             steal_counts,
             park_counts,
+            park_unpark_counts,
+            busy_duration_nanos,
             reactor,
             timer,
             blocking_pool,
@@ -759,11 +794,15 @@ impl LocalRuntime {
 
             let mut ran_any = false;
             while let Some(task) = self.rt.shared.next_task(0) {
+                let start = Instant::now();
                 task.run();
+                self.rt.shared.add_busy_duration(0, start.elapsed());
                 ran_any = true;
             }
             while let Some(task) = self.local.next_local_task() {
+                let start = Instant::now();
                 task.run();
+                self.rt.shared.add_busy_duration(0, start.elapsed());
                 ran_any = true;
             }
             if ran_any {

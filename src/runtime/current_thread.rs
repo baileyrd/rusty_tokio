@@ -46,7 +46,9 @@ pub(super) fn block_on<F: Future>(shared: &Arc<Shared>, future: F) -> F::Output 
         // iteration rather than tracked separately.
         let mut ran_any = false;
         while let Some(task) = shared.next_task(0) {
+            let start = std::time::Instant::now();
             task.run();
+            shared.add_busy_duration(0, start.elapsed());
             ran_any = true;
         }
         if ran_any {

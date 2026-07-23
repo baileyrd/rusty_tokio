@@ -166,6 +166,72 @@ fn worker_park_count_increases_while_a_worker_sits_idle() {
 }
 
 #[test]
+fn worker_park_unpark_count_alternates_parity_and_increases_while_idle() {
+    // `block_on`'s own top-level future runs inline on the *calling*
+    // (test) thread, entirely separate from worker 0's own OS thread --
+    // reading the counter from there would race worker 0's independent
+    // park/unpark cycle. Reading it from *inside* a task actually
+    // spawned onto worker 0 instead guarantees the read lands while
+    // that worker is confirmably active (even), not mid-`park`.
+    let rt = Runtime::builder().worker_threads(1).build().unwrap();
+    let metrics = rt.metrics();
+    rt.block_on(async move {
+        let m = metrics.clone();
+        let before = rusty_tokio::spawn(async move { m.worker_park_unpark_count(0) })
+            .await
+            .unwrap();
+        assert_eq!(
+            before % 2,
+            0,
+            "expected an even (active) count while this task is running"
+        );
+
+        // Nothing else is scheduled on this runtime -- the worker parks
+        // (and re-parks every 50ms) while this sleeps, guaranteeing at
+        // least one full park/unpark cycle before the next spawn below.
+        rusty_tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let m = metrics.clone();
+        let after = rusty_tokio::spawn(async move { m.worker_park_unpark_count(0) })
+            .await
+            .unwrap();
+        assert!(after > before);
+        assert_eq!(
+            after % 2,
+            0,
+            "expected an even (active) count again, having unparked to run this task"
+        );
+    });
+}
+
+#[test]
+fn worker_total_busy_duration_increases_while_running_real_work() {
+    let rt = Runtime::builder().worker_threads(1).build().unwrap();
+    let metrics = rt.metrics();
+    rt.block_on(async move {
+        let before = metrics.worker_total_busy_duration(0);
+
+        // A synchronous (not `.await`-ing) sleep inside the task body
+        // itself, so the ~100ms is genuinely spent inside this single
+        // `task.run()` call rather than yielded back to the scheduler --
+        // exactly the time `worker_total_busy_duration` is meant to
+        // attribute to the worker as busy.
+        rusty_tokio::spawn(async {
+            std::thread::sleep(Duration::from_millis(100));
+        })
+        .await
+        .unwrap();
+
+        let after = metrics.worker_total_busy_duration(0);
+        assert!(
+            after - before >= Duration::from_millis(80),
+            "expected at least ~100ms of newly-busy time, got {:?}",
+            after - before
+        );
+    });
+}
+
+#[test]
 fn num_blocking_threads_reflects_the_pools_live_threads() {
     let rt = Runtime::new().unwrap();
     let metrics = rt.metrics();
