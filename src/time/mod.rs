@@ -571,31 +571,39 @@ impl Interval {
     /// Waits for the next tick, returning the `Instant` it was
     /// scheduled for.
     pub async fn tick(&mut self) -> Instant {
-        std::future::poll_fn(|cx| {
-            let sleep = self
-                .sleep
-                .get_or_insert_with(|| Sleep::at(self.next_deadline));
-            match Pin::new(sleep).poll(cx) {
-                Poll::Ready(()) => {
-                    let fired_at = self.next_deadline;
-                    self.next_deadline = match self.missed_tick_behavior {
-                        MissedTickBehavior::Burst => self.next_deadline + self.period,
-                        MissedTickBehavior::Delay => current_time() + self.period,
-                        MissedTickBehavior::Skip => {
-                            let now = current_time();
-                            let mut next = self.next_deadline + self.period;
-                            while next <= now {
-                                next += self.period;
-                            }
-                            next
+        std::future::poll_fn(|cx| self.poll_tick(cx)).await
+    }
+
+    /// The `poll`-based entry point [`tick`](Self::tick) itself is just
+    /// a thin `poll_fn` wrapper around -- for manual `Future`/`Stream`
+    /// implementations that need to poll an `Interval` alongside other
+    /// work rather than `.await`ing `tick()` directly. See
+    /// `tick`'s docs for what the returned `Instant` means, and
+    /// [`MissedTickBehavior`] for how the *next* deadline after this one
+    /// gets computed.
+    pub fn poll_tick(&mut self, cx: &mut Context<'_>) -> Poll<Instant> {
+        let sleep = self
+            .sleep
+            .get_or_insert_with(|| Sleep::at(self.next_deadline));
+        match Pin::new(sleep).poll(cx) {
+            Poll::Ready(()) => {
+                let fired_at = self.next_deadline;
+                self.next_deadline = match self.missed_tick_behavior {
+                    MissedTickBehavior::Burst => self.next_deadline + self.period,
+                    MissedTickBehavior::Delay => current_time() + self.period,
+                    MissedTickBehavior::Skip => {
+                        let now = current_time();
+                        let mut next = self.next_deadline + self.period;
+                        while next <= now {
+                            next += self.period;
                         }
-                    };
-                    self.sleep = None;
-                    Poll::Ready(fired_at)
-                }
-                Poll::Pending => Poll::Pending,
+                        next
+                    }
+                };
+                self.sleep = None;
+                Poll::Ready(fired_at)
             }
-        })
-        .await
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
