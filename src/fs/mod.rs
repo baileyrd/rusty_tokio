@@ -736,3 +736,47 @@ pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> 
         .await
         .unwrap_or_else(|_| Err(poisoned_error()))
 }
+
+/// Reads the entire contents of the file at `path` into a `Vec<u8>` in
+/// one call. See `std::fs::read` -- one-shot whole-file convenience,
+/// distinct from [`crate::io::AsyncReadExt::read`]/`read_to_end` (which
+/// need an already-open [`File`] to read from incrementally).
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::read(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Reads the entire contents of the file at `path` as a `String` in one
+/// call, failing with `InvalidData` if it isn't valid UTF-8. See
+/// `std::fs::read_to_string`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Writes `contents` to the file at `path` in one call, creating it if
+/// it doesn't exist and truncating it if it does (equivalent to
+/// `File::create` followed by writing the whole buffer). See
+/// `std::fs::write` -- distinct from
+/// [`crate::io::AsyncWriteExt::write`]/`write_all` (which need an
+/// already-open [`File`] to write to incrementally).
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    let contents = contents.as_ref().to_vec();
+    crate::spawn_blocking(move || std::fs::write(path, contents))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
