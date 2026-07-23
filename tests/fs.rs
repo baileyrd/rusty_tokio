@@ -426,3 +426,92 @@ fn free_set_permissions_applies_without_an_open_file() {
     assert_eq!(mode, 0o640);
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn rename_moves_a_file_to_a_new_path() {
+    let src = temp_path("rename-src");
+    let dst = temp_path("rename-dst");
+    std::fs::write(&src, b"content").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::rename(&src, &dst).await.unwrap();
+    });
+
+    assert!(!src.exists());
+    assert_eq!(std::fs::read(&dst).unwrap(), b"content");
+    std::fs::remove_file(&dst).unwrap();
+}
+
+#[test]
+fn hard_link_creates_a_second_name_for_the_same_file() {
+    let original = temp_path("hard-link-original");
+    let link = temp_path("hard-link-link");
+    std::fs::write(&original, b"content").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::hard_link(&original, &link).await.unwrap();
+    });
+
+    assert_eq!(std::fs::read(&link).unwrap(), b"content");
+    // Writing through the original is visible through the link -- they
+    // share the same inode, not just identical starting contents.
+    std::fs::write(&original, b"changed").unwrap();
+    assert_eq!(std::fs::read(&link).unwrap(), b"changed");
+
+    std::fs::remove_file(&original).unwrap();
+    std::fs::remove_file(&link).unwrap();
+}
+
+#[test]
+fn remove_file_deletes_the_file() {
+    let path = temp_path("remove-file");
+    std::fs::write(&path, b"content").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::remove_file(&path).await.unwrap();
+    });
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn copy_duplicates_contents_and_reports_the_byte_count() {
+    let src = temp_path("copy-src-free");
+    let dst = temp_path("copy-dst-free");
+    std::fs::write(&src, b"0123456789").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let n = rusty_tokio::fs::copy(&src, &dst).await.unwrap();
+        assert_eq!(n, 10);
+    });
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"0123456789");
+    // The source is untouched -- this is a copy, not a move.
+    assert_eq!(std::fs::read(&src).unwrap(), b"0123456789");
+
+    std::fs::remove_file(&src).unwrap();
+    std::fs::remove_file(&dst).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_creates_a_link_and_read_link_reports_its_target() {
+    let target = temp_path("symlink-target-free");
+    let link = temp_path("symlink-link-free");
+    std::fs::write(&target, b"content").unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::symlink(&target, &link).await.unwrap();
+        let resolved = rusty_tokio::fs::read_link(&link).await.unwrap();
+        assert_eq!(resolved, target);
+    });
+
+    assert_eq!(std::fs::read(&link).unwrap(), b"content");
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_file(&target).unwrap();
+}

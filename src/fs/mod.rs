@@ -621,3 +621,118 @@ pub async fn set_permissions(path: impl AsRef<Path>, perm: std::fs::Permissions)
         .await
         .unwrap_or_else(|_| Err(poisoned_error()))
 }
+
+/// Renames (moves) `from` to `to`, replacing the destination file if
+/// it already exists. See `std::fs::rename`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    let from = from.as_ref().to_path_buf();
+    let to = to.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::rename(from, to))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Creates a hard link at `link` pointing at `original`. See
+/// `std::fs::hard_link`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_path_buf();
+    let link = link.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::hard_link(original, link))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Reads the target a symlink at `path` points at, without resolving
+/// it further. See `std::fs::read_link`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn read_link(path: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::read_link(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Removes the file at `path` -- see [`remove_dir`] for a directory
+/// instead. See `std::fs::remove_file`.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::remove_file(path))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Copies the file at `from` to `to`, overwriting `to` if it already
+/// exists, and returns the number of bytes copied. See `std::fs::copy`
+/// -- distinct from [`crate::io::copy`], which streams between any
+/// `AsyncRead`/`AsyncWrite` pair rather than delegating to a single
+/// (often more efficient, e.g. `copy_file_range(2)`-backed) OS syscall
+/// between two paths.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+pub async fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
+    let from = from.as_ref().to_path_buf();
+    let to = to.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::fs::copy(from, to))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Creates a symlink at `link` pointing at `original`. See
+/// `std::os::unix::fs::symlink` -- Windows draws a hard distinction
+/// between file and directory symlinks at creation time (`symlink_file`/
+/// `symlink_dir`, Windows-only), which Unix doesn't, so this unified
+/// form is Unix-only.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+#[cfg(unix)]
+pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_path_buf();
+    let link = link.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::os::unix::fs::symlink(original, link))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Creates a symlink at `link` pointing at the file `original` -- see
+/// `std::os::windows::fs::symlink_file`. Windows-only; `symlink`
+/// (Unix-only) is the equivalent file-vs-directory-agnostic function
+/// there.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+#[cfg(windows)]
+pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_path_buf();
+    let link = link.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::os::windows::fs::symlink_file(original, link))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// Creates a symlink at `link` pointing at the directory `original` --
+/// see `std::os::windows::fs::symlink_dir`. Windows-only; see
+/// [`symlink_file`] for the file counterpart.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+#[cfg(windows)]
+pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_path_buf();
+    let link = link.as_ref().to_path_buf();
+    crate::spawn_blocking(move || std::os::windows::fs::symlink_dir(original, link))
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+}
