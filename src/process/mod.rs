@@ -96,6 +96,16 @@ impl Command {
         self
     }
 
+    /// Sets the process group ID (`setpgid`) the child is placed into
+    /// before `execve`, matching the effect of a real shell's job
+    /// control (`0` joins the child's own new group, matching its
+    /// `pid`; a positive value joins an existing group). Thin forward
+    /// to [`std::os::unix::process::CommandExt::process_group`].
+    pub fn process_group(&mut self, pgroup: i32) -> &mut Command {
+        std::os::unix::process::CommandExt::process_group(&mut self.inner, pgroup);
+        self
+    }
+
     pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Command {
         self.inner.env(key, val);
         self

@@ -181,6 +181,29 @@ fn arg0_sets_argv_zero_without_changing_which_binary_actually_runs() {
 }
 
 #[test]
+fn process_group_zero_makes_the_child_its_own_group_leader() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 5")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        let pid = child.id() as libc::pid_t;
+        let pgid = unsafe { libc::getpgid(pid) };
+        assert_eq!(
+            pgid, pid,
+            "process_group(0) should make the child its own group leader"
+        );
+
+        child.kill().unwrap();
+        child.wait().await.unwrap();
+    });
+}
+
+#[test]
 fn as_std_reflects_the_builder_state_set_so_far() {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg("exit 0");
