@@ -282,6 +282,27 @@ pub(crate) fn write(sock: RawSocket, buf: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// Like [`read`], but via `recv` with `MSG_PEEK` -- the bytes stay in
+/// the socket's receive queue for the next real `recv` call.
+pub(crate) fn peek(sock: RawSocket, buf: &mut [u8]) -> io::Result<usize> {
+    let len = buf.len().min(i32::MAX as usize) as i32;
+    // SAFETY: `buf` is valid for `buf.len()` bytes for the call's
+    // duration; `sock` is caller-owned and open.
+    let n = unsafe {
+        WinSock::recv(
+            sock as SOCKET,
+            buf.as_mut_ptr().cast(),
+            len,
+            WinSock::MSG_PEEK,
+        )
+    };
+    if n == WinSock::SOCKET_ERROR {
+        Err(wsa_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
 pub(crate) fn udp_send_to(sock: RawSocket, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
     let (storage, len) = to_sockaddr(addr);
     let buf_len = buf.len().min(i32::MAX as usize) as i32;
@@ -329,6 +350,42 @@ pub(crate) fn udp_recv_from(sock: RawSocket, buf: &mut [u8]) -> io::Result<(usiz
     // SAFETY: the kernel just filled `storage` in via the call above.
     let peer = unsafe { from_sockaddr(&storage) }?;
     Ok((n as usize, peer))
+}
+
+/// Like [`udp_recv_from`], but via `recvfrom` with `MSG_PEEK` -- reports
+/// the next datagram's length and sender without dequeuing it.
+pub(crate) fn peek_from(sock: RawSocket, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    // SAFETY: an all-zero `SOCKADDR_STORAGE` is a valid (if inert) value.
+    let mut storage: SOCKADDR_STORAGE = unsafe { mem::zeroed() };
+    let mut fromlen = mem::size_of::<SOCKADDR_STORAGE>() as i32;
+    let buf_len = buf.len().min(i32::MAX as usize) as i32;
+    // SAFETY: `buf` is valid for `buf.len()` bytes for the call's
+    // duration; `&mut storage`/`&mut fromlen` are valid, exclusively
+    // borrowed out-params; `sock` is caller-owned and open.
+    let n = unsafe {
+        WinSock::recvfrom(
+            sock as SOCKET,
+            buf.as_mut_ptr().cast(),
+            buf_len,
+            WinSock::MSG_PEEK,
+            (&mut storage as *mut SOCKADDR_STORAGE).cast::<SOCKADDR>(),
+            &mut fromlen,
+        )
+    };
+    if n == WinSock::SOCKET_ERROR {
+        return Err(wsa_error());
+    }
+    // SAFETY: the kernel just filled `storage` in via the call above.
+    let peer = unsafe { from_sockaddr(&storage) }?;
+    Ok((n as usize, peer))
+}
+
+/// Like [`peek_from`], but only the sender's address matters -- a
+/// zero-length peek still reports the next datagram's source, without
+/// needing any buffer to receive data into.
+pub(crate) fn peek_sender(sock: RawSocket) -> io::Result<SocketAddr> {
+    let (_n, addr) = peek_from(sock, &mut [])?;
+    Ok(addr)
 }
 
 /// `SD_SEND` -- backs `AsyncWrite::poll_shutdown`, signaling EOF to the
