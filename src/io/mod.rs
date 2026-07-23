@@ -52,7 +52,7 @@ mod unix_datagram;
 pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
 pub use async_io::{
     copy, copy_bidirectional, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek,
-    AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf,
+    AsyncSeekExt, AsyncWrite, AsyncWriteExt, Chain, ReadBuf, Take,
 };
 pub use buffered::{BufReader, BufWriter, Lines};
 #[cfg(feature = "futures-io-compat")]
