@@ -42,7 +42,7 @@
 
 use crate::io::reactor::{poll_io, Interest, Reactor, ScheduledIo};
 use crate::io::socket;
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use crate::runtime::Handle;
 use std::ffi::OsStr;
 use std::io;
@@ -52,7 +52,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-pub use std::process::{ExitStatus, Stdio};
+pub use std::process::{ExitStatus, Output, Stdio};
 
 fn blocking_pool_panicked() -> io::Error {
     io::Error::other("the blocking-pool task waiting on this child process panicked")
@@ -224,6 +224,20 @@ impl Command {
     pub async fn status(&mut self) -> io::Result<ExitStatus> {
         self.spawn()?.wait().await
     }
+
+    /// Spawns the child with stdout/stderr captured (overriding
+    /// whatever [`stdout`](Self::stdout)/[`stderr`](Self::stderr) were
+    /// previously set to), waits for it to exit, and returns everything
+    /// at once. Sugar for `self.stdout(Stdio::piped());
+    /// self.stderr(Stdio::piped()); self.spawn()?.wait_with_output().await`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn output(&mut self) -> io::Result<Output> {
+        self.stdout(Stdio::piped());
+        self.stderr(Stdio::piped());
+        self.spawn()?.wait_with_output().await
+    }
 }
 
 /// A spawned child process. `stdin`/`stdout`/`stderr` are `Some` exactly
@@ -318,6 +332,56 @@ impl Child {
             .unwrap_or_else(|_| Err(blocking_pool_panicked()))?;
         self.status = Some(status);
         Ok(status)
+    }
+
+    /// Waits for the child to exit, concurrently draining whatever of
+    /// `stdout`/`stderr` were piped, and returns everything at once.
+    /// Drains both streams *while* waiting rather than one after the
+    /// other: sequentially draining one stream (or waiting first) while
+    /// a child that's already filled the other's pipe buffer sits
+    /// blocked trying to write more would deadlock -- the same reason
+    /// `std::process::Child::wait_with_output` also drains
+    /// concurrently.
+    ///
+    /// `stdin` is dropped first (if still piped) so a child waiting to
+    /// read EOF from it before exiting isn't left waiting forever, the
+    /// same deadlock caveat [`wait`](Self::wait) itself carries, and
+    /// the same thing `std::process::Child::wait_with_output` does.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn wait_with_output(mut self) -> io::Result<Output> {
+        drop(self.stdin.take());
+        // Taken out into locals rather than borrowed from `self`
+        // directly -- `self.wait()` below needs `&mut self` as a whole
+        // (not just its `status`/`inner` fields), which would otherwise
+        // conflict with these two futures each separately borrowing
+        // `self.stdout`/`self.stderr`.
+        let mut stdout = self.stdout.take();
+        let mut stderr = self.stderr.take();
+
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let stdout_fut = async {
+            match &mut stdout {
+                Some(stdout) => stdout.read_to_end(&mut stdout_buf).await.map(|_| ()),
+                None => Ok(()),
+            }
+        };
+        let stderr_fut = async {
+            match &mut stderr {
+                Some(stderr) => stderr.read_to_end(&mut stderr_buf).await.map(|_| ()),
+                None => Ok(()),
+            }
+        };
+        let status_fut = self.wait();
+
+        let (status, _, _) = crate::try_join!(status_fut, stdout_fut, stderr_fut)?;
+        Ok(Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        })
     }
 }
 

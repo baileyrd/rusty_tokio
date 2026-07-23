@@ -303,3 +303,60 @@ fn status_spawns_and_waits_reporting_the_exit_code() {
         assert_eq!(status.code(), Some(7));
     });
 }
+
+#[test]
+fn output_captures_stdout_and_stderr_and_reports_the_exit_code() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("echo to stdout; echo to stderr 1>&2; exit 5")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        assert_eq!(output.stdout, b"to stdout\n");
+        assert_eq!(output.stderr, b"to stderr\n");
+    });
+}
+
+#[test]
+fn wait_with_output_does_not_deadlock_on_a_chatty_child() {
+    // A child that writes enough to fill an OS pipe buffer on *both*
+    // stdout and stderr before exiting would deadlock a naive
+    // sequential drain (read all of stdout, then all of stderr, then
+    // wait) -- this only passes if both streams are actually drained
+    // concurrently with the wait.
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let output = rusty_tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("yes stdout-line | head -c 200000; yes stderr-line | head -c 200000 1>&2")
+                .output(),
+        )
+        .await
+        .expect("draining both piped streams concurrently with wait must not deadlock")
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 200_000);
+        assert_eq!(output.stderr.len(), 200_000);
+    });
+}
+
+#[test]
+fn wait_with_output_works_when_only_stdout_is_piped() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo only stdout");
+        cmd.stdout(Stdio::piped());
+        let child = cmd.spawn().unwrap();
+
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"only stdout\n");
+        assert_eq!(output.stderr, b"");
+    });
+}
