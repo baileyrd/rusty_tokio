@@ -289,3 +289,17 @@ fn as_std_mut_setters_apply_to_the_spawned_child() {
         assert!(status.success());
     });
 }
+
+#[test]
+fn status_spawns_and_waits_reporting_the_exit_code() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 7")
+            .status()
+            .await
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+    });
+}
