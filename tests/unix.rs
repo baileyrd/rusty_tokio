@@ -48,6 +48,104 @@ fn unix_into_split_moves_owned_halves_into_separate_tasks() {
 }
 
 #[test]
+fn unix_reunite_succeeds_for_halves_from_the_same_stream_and_it_still_works() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("reunite-ok");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (read_half, write_half) = client.into_split();
+        let reunited = read_half.reunite(write_half).unwrap();
+
+        reunited.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        reunited.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unix_reunite_fails_for_halves_from_different_streams_and_hands_them_back() {
+    let rt = Runtime::new().unwrap();
+    // Two separate listener paths (rather than one listener accepting
+    // both connections) so which accepted stream corresponds to which
+    // client connection is deterministic by construction, not by
+    // accept-ordering.
+    let path_a = temp_socket_path("reunite-mismatch-a");
+    let path_b = temp_socket_path("reunite-mismatch-b");
+    rt.block_on(async {
+        let _listener_a = UnixListener::bind(&path_a).unwrap();
+        let listener_b = UnixListener::bind(&path_b).unwrap();
+
+        // `a`'s connection is deliberately never `accept()`-ed here --
+        // `connect` below already completed the handshake, so it stays
+        // a live, open connection from the client's perspective for as
+        // long as `listener_a` itself stays alive (kept alive in this
+        // outer scope, not dropped until the whole test body finishes
+        // -- dropping the *listener* while a connection still sits
+        // unaccepted in its backlog resets that connection, which
+        // would defeat the point here).
+        let server = rusty_tokio::spawn(async move {
+            let (b, _peer) = listener_b.accept().await.unwrap();
+            let mut buf = [0u8; 2];
+            b.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hi");
+        });
+
+        let a = UnixStream::connect(&path_a).await.unwrap();
+        let b = UnixStream::connect(&path_b).await.unwrap();
+        let (read_a, _write_a) = a.into_split();
+        let (_read_b, write_b) = b.into_split();
+
+        let Err(err) = read_a.reunite(write_b) else {
+            panic!("expected reunite to fail for halves from different streams");
+        };
+        let (read_a, mut write_b) = (err.0, err.1);
+        write_b.write_all(b"hi").await.unwrap();
+        assert_eq!(
+            read_a.try_read(&mut [0u8; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "read_a should still be a live, functioning half with nothing sent to it"
+        );
+
+        server.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path_a);
+    let _ = std::fs::remove_file(&path_b);
+}
+
+#[test]
+fn unix_owned_halves_as_ref_exposes_the_underlying_stream() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("as-ref");
+    rt.block_on(async {
+        let _listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (read_half, write_half) = client.into_split();
+
+        let read_local = AsRef::<UnixStream>::as_ref(&read_half)
+            .local_addr()
+            .unwrap();
+        let write_local = AsRef::<UnixStream>::as_ref(&write_half)
+            .local_addr()
+            .unwrap();
+        assert_eq!(read_local, write_local);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn unix_split_borrows_read_and_write_halves_from_one_task() {
     let rt = Runtime::new().unwrap();
     let path = temp_socket_path("split");

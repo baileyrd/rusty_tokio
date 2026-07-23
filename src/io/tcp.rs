@@ -702,6 +702,14 @@ impl OwnedReadHalf {
     pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
         self.0.try_read_vectored(bufs)
     }
+
+    /// Recombines this half with its `other` write half back into a
+    /// single [`TcpStream`], if they came from the same
+    /// [`TcpStream::into_split`] call -- see [`ReuniteError`] for when
+    /// they didn't.
+    pub fn reunite(self, other: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
+        reunite(self, other)
+    }
 }
 
 impl OwnedWriteHalf {
@@ -712,7 +720,73 @@ impl OwnedWriteHalf {
     pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         self.0.try_write_vectored(bufs)
     }
+
+    /// Recombines this half with its `other` read half back into a
+    /// single [`TcpStream`] -- see [`OwnedReadHalf::reunite`].
+    pub fn reunite(self, other: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
+        reunite(other, self)
+    }
 }
+
+impl AsRef<TcpStream> for OwnedReadHalf {
+    fn as_ref(&self) -> &TcpStream {
+        &self.0
+    }
+}
+
+impl AsRef<TcpStream> for OwnedWriteHalf {
+    fn as_ref(&self) -> &TcpStream {
+        &self.0
+    }
+}
+
+/// Recombines `read`/`write` into the single `TcpStream` they were
+/// [`split`](TcpStream::into_split) from, if the two `Arc`s underneath
+/// them are the same allocation -- `Err` otherwise, handing both halves
+/// straight back rather than dropping them.
+fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
+    if Arc::ptr_eq(&read.0, &write.0) {
+        drop(write);
+        // `read` was the last of the two clones sharing this `Arc`, now
+        // that `write`'s has just been dropped -- this always succeeds.
+        Ok(Arc::try_unwrap(read.0).unwrap_or_else(|_| {
+            unreachable!(
+                "TcpStream: Arc::try_unwrap failed in reunite despite being the last clone"
+            )
+        }))
+    } else {
+        Err(ReuniteError(read, write))
+    }
+}
+
+/// The error [`OwnedReadHalf::reunite`]/[`OwnedWriteHalf::reunite`]
+/// return when the two halves passed in didn't come from the same
+/// [`TcpStream::into_split`] call -- hands both halves straight back
+/// rather than dropping them, so the caller isn't forced to discard
+/// otherwise-still-usable halves just because they didn't match.
+pub struct ReuniteError(pub OwnedReadHalf, pub OwnedWriteHalf);
+
+// Neither `OwnedReadHalf`/`OwnedWriteHalf` nor `TcpStream` itself
+// implement `Debug` (a separate, unrelated gap this issue doesn't cover)
+// -- `#[derive(Debug)]` would require both, so this just names the type,
+// which is all callers typically need `Debug` for here (e.g. an
+// `.unwrap_err()` panic message).
+impl std::fmt::Debug for ReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ReuniteError").finish()
+    }
+}
+
+impl std::fmt::Display for ReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tried to reunite halves that are not from the same socket"
+        )
+    }
+}
+
+impl std::error::Error for ReuniteError {}
 
 impl AsyncRead for OwnedReadHalf {
     fn poll_read(
