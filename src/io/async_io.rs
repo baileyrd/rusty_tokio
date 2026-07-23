@@ -290,6 +290,39 @@ pub trait AsyncReadExt: AsyncRead {
     read_int_method!(read_i128, read_i128_le, i128);
     read_int_method!(read_f32, read_f32_le, f32);
     read_int_method!(read_f64, read_f64_le, f64);
+
+    /// Reads into whatever spare capacity `buf` currently has, advancing
+    /// it by however many bytes actually landed. Returns `0` (without
+    /// reading at all) once `buf` has no capacity left, the same
+    /// EOF-shaped signal `read` itself gives on a zero-length buffer.
+    ///
+    /// Unlike tokio's own `read_buf`, which reads directly into `B`'s
+    /// spare capacity via `BufMut::chunk_mut` (possibly-uninitialized
+    /// memory), this crate's own [`ReadBuf`] deliberately doesn't track
+    /// an uninitialized tail (see that type's own docs) -- so this reads
+    /// into an ordinary zeroed stack buffer first and copies the result
+    /// into `buf` via `put_slice`. Costs one extra copy versus tokio's
+    /// zero-copy path; not worth the unsafe `MaybeUninit` plumbing this
+    /// crate's `ReadBuf` deliberately avoids elsewhere for how rarely
+    /// `bytes::Buf` integration is the hot path.
+    fn read_buf<B: bytes::BufMut + Send>(
+        &mut self,
+        buf: &mut B,
+    ) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            if !buf.has_remaining_mut() {
+                return Ok(0);
+            }
+            let mut chunk = [0u8; 8192];
+            let want = chunk.len().min(buf.remaining_mut());
+            let n = self.read(&mut chunk[..want]).await?;
+            buf.put_slice(&chunk[..n]);
+            Ok(n)
+        }
+    }
 }
 
 impl<T: AsyncRead + ?Sized> AsyncReadExt for T {}
@@ -396,6 +429,51 @@ pub trait AsyncWriteExt: AsyncWrite {
     write_int_method!(write_i128, write_i128_le, i128);
     write_int_method!(write_f32, write_f32_le, f32);
     write_int_method!(write_f64, write_f64_le, f64);
+
+    /// Writes as much of `buf`'s remaining bytes as one `write` call
+    /// takes, advancing `buf` by however much was actually written.
+    /// Unlike [`read_buf`](AsyncReadExt::read_buf), this needs no extra
+    /// copy: `Buf::chunk` already hands back ordinary initialized
+    /// `&[u8]`, so it goes straight to `write`.
+    fn write_buf<B: bytes::Buf + Send>(
+        &mut self,
+        buf: &mut B,
+    ) -> impl Future<Output = io::Result<usize>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            if !buf.has_remaining() {
+                return Ok(0);
+            }
+            let n = self.write(buf.chunk()).await?;
+            buf.advance(n);
+            Ok(n)
+        }
+    }
+
+    /// Like [`write_buf`](Self::write_buf), but loops until `buf` is
+    /// completely drained -- the `Buf`-based counterpart of `write_all`.
+    fn write_all_buf<B: bytes::Buf + Send>(
+        &mut self,
+        buf: &mut B,
+    ) -> impl Future<Output = io::Result<()>> + Send
+    where
+        Self: Unpin + Send,
+    {
+        async move {
+            while buf.has_remaining() {
+                let n = self.write_buf(buf).await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 impl<T: AsyncWrite + ?Sized> AsyncWriteExt for T {}
