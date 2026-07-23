@@ -249,13 +249,26 @@ pub(crate) fn connect(sock: RawSocket, addr: SocketAddr) -> io::Result<()> {
 
 /// `SO_ERROR` -- the standard way to learn whether a non-blocking
 /// `connect` that just became writable actually succeeded, or failed
-/// asynchronously (e.g. connection refused).
+/// asynchronously (e.g. connection refused). Collapses [`take_error`]'s
+/// `Option` into the pending error itself -- see that function's own
+/// docs for the reasoning, identical here.
 pub(crate) fn take_socket_error(sock: RawSocket) -> io::Result<()> {
+    match take_error(sock)? {
+        None => Ok(()),
+        Some(err) => Err(err),
+    }
+}
+
+/// The reverse framing of [`take_socket_error`]: `Ok(None)` if there's
+/// no pending socket error, `Ok(Some(err))` if there was one (reading
+/// `SO_ERROR` clears it), `Err(..)` only if `getsockopt` itself failed
+/// outright.
+pub(crate) fn take_error(sock: RawSocket) -> io::Result<Option<io::Error>> {
     let err = getsockopt_int(sock, WinSock::SOL_SOCKET, WinSock::SO_ERROR)?;
     if err == 0 {
-        Ok(())
+        Ok(None)
     } else {
-        Err(io::Error::from_raw_os_error(err))
+        Ok(Some(io::Error::from_raw_os_error(err)))
     }
 }
 

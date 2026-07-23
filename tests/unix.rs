@@ -100,6 +100,28 @@ fn unix_echo_roundtrip() {
 }
 
 #[test]
+fn unix_take_error_is_none_on_healthy_sockets() {
+    let rt = Runtime::new().unwrap();
+    let path = temp_socket_path("take_error");
+    rt.block_on(async {
+        let listener = UnixListener::bind(&path).unwrap();
+        assert!(listener.take_error().unwrap().is_none());
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            stream
+        });
+
+        let client = UnixStream::connect(&path).await.unwrap();
+        assert!(client.take_error().unwrap().is_none());
+
+        let stream = server.await.unwrap();
+        assert!(stream.take_error().unwrap().is_none());
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn many_concurrent_unix_connections() {
     let rt = Runtime::builder().worker_threads(4).build().unwrap();
     let path = temp_socket_path("many");

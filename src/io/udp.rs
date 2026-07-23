@@ -465,6 +465,12 @@ impl UdpSocket {
         socket::tclass_v6(self.inner.as_raw_io())
     }
 
+    /// `SO_ERROR` -- see [`TcpStream::take_error`](super::TcpStream::take_error)
+    /// for the full contract, identical here.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        socket::take_error(self.inner.as_raw_io())
+    }
+
     /// Adopts an already-bound `std` socket -- e.g. one received from a
     /// supervisor process, or configured with `socket2` for an option
     /// this crate doesn't expose a wrapper for. Flips it non-blocking
