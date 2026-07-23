@@ -4,7 +4,7 @@ use super::reactor::{
     TryCloneIo,
 };
 use super::socket::{self, from_platform_err};
-use super::{readiness, Interest, Ready};
+use super::{readiness, Interest, Ready, ToSocketAddrs};
 use crate::runtime::Handle;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -61,6 +61,38 @@ impl TcpListener {
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
         Ok(TcpListener { inner, io, reactor })
+    }
+
+    /// The [`ToSocketAddrs`]-based counterpart of [`bind`](Self::bind) --
+    /// a `"host:port"` string, an `(&str, u16)` pair, or anything else
+    /// [`ToSocketAddrs`] covers, not just a concrete [`SocketAddr`].
+    /// Resolving a hostname needs a [`crate::spawn_blocking`] round trip
+    /// (see [`crate::io::lookup_host`]), so this is `async fn` where
+    /// [`bind`](Self::bind) itself stays synchronous -- an additive
+    /// method alongside it rather than a replacement, so no existing
+    /// synchronous caller of `bind` breaks.
+    ///
+    /// A form that resolves to more than one address is tried in order,
+    /// the same way [`TcpStream::connect`] tries each of its own
+    /// resolved candidates.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn bind_addrs(addr: impl ToSocketAddrs) -> io::Result<TcpListener> {
+        let addrs = addr.to_socket_addrs().await?;
+        let mut last_err = None;
+        for addr in addrs {
+            match TcpListener::bind(addr) {
+                Ok(listener) => return Ok(listener),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
+        }))
     }
 
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
@@ -250,9 +282,40 @@ impl TcpStream {
         (OwnedReadHalf(inner.clone()), OwnedWriteHalf(inner))
     }
 
+    /// Connects to `addr` -- a concrete [`SocketAddr`], a `"host:port"`
+    /// string, an `(&str, u16)` pair, or anything else [`ToSocketAddrs`]
+    /// covers. A form that resolves to more than one address (a
+    /// hostname with multiple `A`/`AAAA` records, say) is tried in
+    /// order, the same way `std::net::TcpStream::connect` tries each of
+    /// its own resolved candidates until one succeeds or every one has
+    /// failed.
+    ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
-    pub async fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
+    pub async fn connect(addr: impl ToSocketAddrs) -> io::Result<TcpStream> {
+        let addrs = addr.to_socket_addrs().await?;
+        let mut last_err = None;
+        for addr in addrs {
+            match TcpStream::connect_addr(addr).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
+        }))
+    }
+
+    /// The concrete-[`SocketAddr`]-only counterpart of [`connect`
+    /// ](Self::connect), for a caller that already has one and wants to
+    /// skip resolution/the multi-address fallback loop entirely.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_tcp_socket(addr)?;
         socket::connect(fd.as_raw_io(), addr)?;

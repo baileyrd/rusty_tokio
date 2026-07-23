@@ -2,7 +2,7 @@ use super::reactor::{
     poll_io, AsRawIo, Interest as ReactorInterest, OwnedIo, Reactor, ScheduledIo, TryCloneIo,
 };
 use super::socket::{self, from_platform_err};
-use super::{readiness, Interest, Ready};
+use super::{readiness, Interest, Ready, ToSocketAddrs};
 use crate::runtime::Handle;
 use std::io;
 use std::net::SocketAddr;
@@ -54,6 +54,31 @@ impl UdpSocket {
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
         Ok(UdpSocket { inner, io, reactor })
+    }
+
+    /// The [`ToSocketAddrs`]-based counterpart of [`bind`](Self::bind) --
+    /// see [`TcpListener::bind_addrs`](super::TcpListener::bind_addrs)
+    /// for the full contract (additive alongside the existing
+    /// synchronous `bind`, not a replacement for it) and why this is
+    /// `async fn` where `bind` itself isn't.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn bind_addrs(addr: impl ToSocketAddrs) -> io::Result<UdpSocket> {
+        let addrs = addr.to_socket_addrs().await?;
+        let mut last_err = None;
+        for addr in addrs {
+            match UdpSocket::bind(addr) {
+                Ok(socket) => return Ok(socket),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
+        }))
     }
 
     pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
@@ -176,6 +201,31 @@ impl UdpSocket {
     /// `EINPROGRESS` branch simply never triggers.
     pub fn connect(&self, addr: SocketAddr) -> io::Result<()> {
         socket::connect(self.inner.as_raw_io(), addr)
+    }
+
+    /// The [`ToSocketAddrs`]-based counterpart of [`connect`
+    /// ](Self::connect) -- see [`TcpListener::bind_addrs`
+    /// ](super::TcpListener::bind_addrs) for the full contract (additive
+    /// alongside the existing synchronous `connect`, not a replacement
+    /// for it) and why this is `async fn` where `connect` itself isn't.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn connect_addrs(&self, addr: impl ToSocketAddrs) -> io::Result<()> {
+        let addrs = addr.to_socket_addrs().await?;
+        let mut last_err = None;
+        for addr in addrs {
+            match self.connect(addr) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
+        }))
     }
 
     /// Sends to whichever peer [`connect`](Self::connect) fixed.

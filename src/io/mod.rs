@@ -29,6 +29,7 @@
 //! `unix_datagram.rs` are POSIX-only, `#[cfg(unix)]`-gated below; `tcp.rs`/
 //! `udp.rs` instead gain a third, hand-rolled `socket::windows` arm.
 
+mod addr;
 #[cfg(unix)]
 mod async_fd;
 mod async_io;
@@ -55,6 +56,7 @@ mod unix;
 mod unix_datagram;
 mod util;
 
+pub use addr::ToSocketAddrs;
 #[cfg(unix)]
 pub use async_fd::{AsyncFd, AsyncFdReadyGuard, TryIoError};
 pub use async_io::{
