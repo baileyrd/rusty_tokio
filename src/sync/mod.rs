@@ -13,6 +13,7 @@ mod notify;
 mod once_cell;
 mod rwlock;
 mod semaphore;
+mod set_once;
 
 pub use barrier::{Barrier, BarrierWaitResult};
 pub use mutex::{MappedMutexGuard, Mutex, MutexGuard, OwnedMappedMutexGuard, OwnedMutexGuard};
@@ -23,3 +24,4 @@ pub use rwlock::{
     RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard,
 };
 pub use semaphore::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+pub use set_once::{SetOnce, SetOnceError};

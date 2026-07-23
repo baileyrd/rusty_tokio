@@ -1,4 +1,6 @@
-use rusty_tokio::sync::{mpsc, oneshot, Mutex, MutexGuard, Notify, OnceCell, RwLock, Semaphore};
+use rusty_tokio::sync::{
+    mpsc, oneshot, Mutex, MutexGuard, Notify, OnceCell, RwLock, Semaphore, SetOnce,
+};
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -1688,5 +1690,102 @@ fn broadcast_ring_buffer_overwrites_the_oldest_slot_once_full() {
         assert_eq!(rx.recv().await.unwrap(), 2);
         assert_eq!(rx.recv().await.unwrap(), 3);
         assert_eq!(rx.recv().await.unwrap(), 4);
+    });
+}
+
+#[test]
+fn set_once_get_returns_none_before_set_and_some_after() {
+    let cell = SetOnce::new();
+    assert_eq!(cell.get(), None);
+    assert!(!cell.initialized());
+
+    assert!(cell.set("hello").is_ok());
+    assert_eq!(cell.get(), Some(&"hello"));
+    assert!(cell.initialized());
+}
+
+#[test]
+fn set_once_set_succeeds_once_then_fails_and_hands_the_value_back() {
+    let cell = SetOnce::new();
+    assert!(cell.set(1).is_ok());
+
+    let err = cell.set(2).unwrap_err();
+    assert_eq!(err.into_inner(), 2);
+    assert_eq!(cell.get(), Some(&1));
+}
+
+#[test]
+fn set_once_new_with_is_already_initialized() {
+    let cell = SetOnce::new_with(7);
+    assert!(cell.initialized());
+    assert_eq!(cell.get(), Some(&7));
+    assert!(cell.set(8).is_err());
+}
+
+#[test]
+fn set_once_into_inner_returns_the_value_when_set() {
+    let cell: SetOnce<String> = SetOnce::new();
+    assert_eq!(cell.into_inner(), None);
+
+    let cell = SetOnce::new_with(String::from("owned"));
+    assert_eq!(cell.into_inner(), Some(String::from("owned")));
+}
+
+#[test]
+fn set_once_wait_resolves_immediately_if_already_set() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let cell = SetOnce::new_with(42);
+        let value = rusty_tokio::time::timeout(Duration::from_millis(50), cell.wait())
+            .await
+            .expect("wait() on an already-set cell must not block");
+        assert_eq!(*value, 42);
+    });
+}
+
+#[test]
+fn set_once_wait_resolves_once_another_task_calls_set() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(SetOnce::new());
+        let waiter = {
+            let cell = cell.clone();
+            rusty_tokio::spawn(async move { *cell.wait().await })
+        };
+
+        // Give the spawned task a chance to actually start waiting.
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cell.set("late").is_ok());
+
+        let value = rusty_tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("set() should wake every waiter")
+            .unwrap();
+        assert_eq!(value, "late");
+    });
+}
+
+#[test]
+fn set_once_wait_wakes_every_concurrent_waiter() {
+    let rt = Runtime::builder().worker_threads(4).build().unwrap();
+    rt.block_on(async {
+        let cell = Arc::new(SetOnce::new());
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let cell = cell.clone();
+                rusty_tokio::spawn(async move { *cell.wait().await })
+            })
+            .collect();
+
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cell.set(99).is_ok());
+
+        for w in waiters {
+            let value = rusty_tokio::time::timeout(Duration::from_millis(200), w)
+                .await
+                .expect("set() should wake every concurrent waiter")
+                .unwrap();
+            assert_eq!(value, 99);
+        }
     });
 }
