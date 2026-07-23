@@ -161,6 +161,69 @@ fn create_dir_all_makes_every_missing_parent() {
 }
 
 #[test]
+fn dir_builder_non_recursive_fails_if_the_parent_is_missing() {
+    let parent = temp_path("dir-builder-non-recursive-missing-parent");
+    let child = parent.join("child");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let err = rusty_tokio::fs::DirBuilder::new()
+            .create(&child)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(!child.exists());
+    });
+}
+
+#[test]
+fn dir_builder_recursive_makes_every_missing_parent() {
+    let root = temp_path("dir-builder-recursive");
+    let nested = root.join("a").join("b").join("c");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::DirBuilder::new()
+            .recursive(true)
+            .create(&nested)
+            .await
+            .unwrap();
+        assert!(nested.is_dir());
+
+        // Succeeds again without complaint, matching `create_dir_all`.
+        rusty_tokio::fs::DirBuilder::new()
+            .recursive(true)
+            .create(&nested)
+            .await
+            .unwrap();
+    });
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn dir_builder_mode_sets_unix_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("dir-builder-mode");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        rusty_tokio::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // The requested mode has no group/other bits, and the process
+        // umask can only clear bits (never set ones the mode didn't
+        // request), so those bits are guaranteed absent from the
+        // result regardless of the ambient umask -- unlike the default
+        // (unmasked) directory mode, which does grant group/other
+        // access under a typical umask.
+        assert_eq!(mode & 0o077, 0);
+    });
+    std::fs::remove_dir(&path).unwrap();
+}
+
+#[test]
 fn remove_dir_removes_an_empty_directory() {
     let path = temp_path("remove-dir");
     std::fs::create_dir(&path).unwrap();

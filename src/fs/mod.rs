@@ -1,4 +1,4 @@
-//! Async filesystem I/O: [`File`], the only type here so far.
+//! Async filesystem I/O: [`File`] and [`DirBuilder`].
 //!
 //! A regular file can't be registered with `epoll`/`kevent`'s readiness
 //! model the way a socket can -- from the kernel's point of view a file
@@ -779,4 +779,77 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
     crate::spawn_blocking(move || std::fs::write(path, contents))
         .await
         .unwrap_or_else(|_| Err(poisoned_error()))
+}
+
+/// A builder for creating a directory with configurable recursion and
+/// (on Unix) mode bits, in one call rather than [`create_dir`]/
+/// [`create_dir_all`] plus a separate [`set_permissions`]. See
+/// `std::fs::DirBuilder` / tokio's `fs::DirBuilder`.
+///
+/// Named `DirBuilder` rather than colliding with [`File::create`] the
+/// way `std::fs::DirBuilder::create` does with `std::fs::File::create`
+/// -- both exist here too, disambiguated the same way `std` disambiguates
+/// them: by which type the method is called on.
+///
+/// Stores its own `recursive`/`mode` settings rather than wrapping
+/// `std::fs::DirBuilder` directly, since the latter isn't `Send` in a
+/// way that survives being moved into the `spawn_blocking` closure
+/// `create` dispatches to; a fresh `std::fs::DirBuilder` is assembled
+/// from these fields on the blocking thread instead.
+#[derive(Debug, Default)]
+pub struct DirBuilder {
+    recursive: bool,
+    #[cfg(unix)]
+    mode: Option<u32>,
+}
+
+impl DirBuilder {
+    /// Creates a new builder with recursion off and the platform default
+    /// mode. See `std::fs::DirBuilder::new`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets whether [`create`](Self::create) recursively creates any
+    /// missing parent directories (like [`create_dir_all`]) instead of
+    /// failing if one doesn't already exist (like [`create_dir`]).
+    pub fn recursive(&mut self, recursive: bool) -> &mut Self {
+        self.recursive = recursive;
+        self
+    }
+
+    /// Sets the Unix mode bits (masked by the process umask) new
+    /// directories are created with. See
+    /// `std::os::unix::fs::DirBuilderExt::mode`. Unix-only.
+    #[cfg(unix)]
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Creates the directory at `path` with this builder's configured
+    /// options. See `std::fs::DirBuilder::create`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub async fn create(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref().to_path_buf();
+        let recursive = self.recursive;
+        #[cfg(unix)]
+        let mode = self.mode;
+        crate::spawn_blocking(move || {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(recursive);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                if let Some(mode) = mode {
+                    builder.mode(mode);
+                }
+            }
+            builder.create(path)
+        })
+        .await
+        .unwrap_or_else(|_| Err(poisoned_error()))
+    }
 }
