@@ -459,6 +459,22 @@ impl TcpStream {
         })
     }
 
+    /// Like [`try_read`](Self::try_read), but into a [`bytes::BufMut`]'s
+    /// spare capacity instead of a plain `&mut [u8]` -- see
+    /// [`AsyncReadExt::read_buf`](super::AsyncReadExt::read_buf) for why
+    /// this crate copies through a stack buffer rather than tokio's own
+    /// zero-copy uninitialized-memory path.
+    pub fn try_read_buf<B: bytes::BufMut>(&self, buf: &mut B) -> io::Result<usize> {
+        if !buf.has_remaining_mut() {
+            return Ok(0);
+        }
+        let mut chunk = [0u8; 8192];
+        let want = chunk.len().min(buf.remaining_mut());
+        let n = self.try_read(&mut chunk[..want])?;
+        buf.put_slice(&chunk[..n]);
+        Ok(n)
+    }
+
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, ReactorInterest::Read, cx, || {
             socket::read(self.inner.as_raw_io(), buf)
