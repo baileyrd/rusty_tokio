@@ -126,6 +126,77 @@ impl Drop for TcpListener {
     }
 }
 
+// `inner` (the concrete rustils/hand-rolled Windows type) already
+// implements `AsFd`/`AsRawFd` (Unix) or `AsSocket`/`AsRawSocket`
+// (Windows) -- see "Built on rustils" in the README -- so these are
+// plain delegation, not new logic. `FromRawFd`/`IntoRawFd` (and their
+// Windows equivalents) reuse `from_std`/`into_std` above rather than
+// duplicating their reactor-registration/non-blocking-flip logic;
+// both traits are infallible by signature, so a registration failure
+// here panics the same way it would if `from_std`/`into_std` were
+// called directly and `.unwrap()`-ed.
+#[cfg(unix)]
+impl std::os::fd::AsFd for TcpListener {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TcpListener {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::FromRawFd for TcpListener {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        TcpListener::from_std(std_listener).expect("failed to register raw fd with the reactor")
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::IntoRawFd for TcpListener {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for TcpListener {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        self.inner.as_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for TcpListener {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.inner.as_raw_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::FromRawSocket for TcpListener {
+    unsafe fn from_raw_socket(socket: std::os::windows::io::RawSocket) -> Self {
+        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket) };
+        TcpListener::from_std(std_listener).expect("failed to register raw socket with the reactor")
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::IntoRawSocket for TcpListener {
+    fn into_raw_socket(self) -> std::os::windows::io::RawSocket {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_socket()
+    }
+}
+
 /// A non-blocking, epoll-driven TCP stream.
 ///
 /// Exposes both a plain `&self` `async fn read`/`write` pair (so one
@@ -285,6 +356,70 @@ impl TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         self.reactor.deregister(self.inner.as_raw_io());
+    }
+}
+
+// See `TcpListener`'s equivalent impls above for why these are plain
+// delegation and why `FromRawFd`/`IntoRawFd` reuse `from_std`/`into_std`.
+#[cfg(unix)]
+impl std::os::fd::AsFd for TcpStream {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TcpStream {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::FromRawFd for TcpStream {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        let std_stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        TcpStream::from_std(std_stream).expect("failed to register raw fd with the reactor")
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::IntoRawFd for TcpStream {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for TcpStream {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        self.inner.as_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for TcpStream {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.inner.as_raw_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::FromRawSocket for TcpStream {
+    unsafe fn from_raw_socket(socket: std::os::windows::io::RawSocket) -> Self {
+        let std_stream = unsafe { std::net::TcpStream::from_raw_socket(socket) };
+        TcpStream::from_std(std_stream).expect("failed to register raw socket with the reactor")
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::IntoRawSocket for TcpStream {
+    fn into_raw_socket(self) -> std::os::windows::io::RawSocket {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_socket()
     }
 }
 
@@ -543,5 +678,69 @@ impl TcpSocket {
         })
         .await?;
         Ok(TcpStream { inner, io, reactor })
+    }
+}
+
+// `fd: OwnedIo` is already a plain `std::os::fd::OwnedFd`/
+// `std::os::windows::io::OwnedSocket`, both of which implement these
+// traits natively -- delegation only, no reactor involved (a bare
+// `TcpSocket` is never registered with one).
+#[cfg(unix)]
+impl std::os::fd::AsFd for TcpSocket {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for TcpSocket {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::FromRawFd for TcpSocket {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        TcpSocket {
+            fd: unsafe { OwnedIo::from_raw_fd(fd) },
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::IntoRawFd for TcpSocket {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for TcpSocket {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        self.fd.as_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for TcpSocket {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.fd.as_raw_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::FromRawSocket for TcpSocket {
+    unsafe fn from_raw_socket(socket: std::os::windows::io::RawSocket) -> Self {
+        TcpSocket {
+            fd: unsafe { OwnedIo::from_raw_socket(socket) },
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::IntoRawSocket for TcpSocket {
+    fn into_raw_socket(self) -> std::os::windows::io::RawSocket {
+        self.fd.into_raw_socket()
     }
 }

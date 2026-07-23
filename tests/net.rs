@@ -168,3 +168,113 @@ fn udp_connect_allows_send_and_recv_without_addressing() {
         responder.await.unwrap();
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn tcp_stream_raw_fd_roundtrip_preserves_functionality() {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        assert!(client.as_raw_fd() >= 0);
+        let fd = client.into_raw_fd();
+        let client = unsafe { TcpStream::from_raw_fd(fd) };
+
+        client.write_all(b"roundtrip").await.unwrap();
+        let mut buf = [0u8; 64];
+        client.read_exact(&mut buf[..9]).await.unwrap();
+        assert_eq!(&buf[..9], b"roundtrip");
+
+        server.await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn tcp_listener_raw_fd_roundtrip_can_still_accept() {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let fd = listener.into_raw_fd();
+        let listener = unsafe { TcpListener::from_raw_fd(fd) };
+
+        let server = rusty_tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"still works");
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"still works").await.unwrap();
+        server.await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn udp_socket_raw_fd_roundtrip_preserves_functionality() {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let a_addr = a.local_addr().unwrap();
+
+        let fd = b.into_raw_fd();
+        let b = unsafe { UdpSocket::from_raw_fd(fd) };
+        let b_addr = b.local_addr().unwrap();
+
+        let responder = rusty_tokio::spawn(async move {
+            let mut buf = [0u8; 32];
+            let (n, peer) = b.recv_from(&mut buf).await.unwrap();
+            b.send_to(&buf[..n], peer).await.unwrap();
+        });
+
+        a.send_to(b"ping", b_addr).await.unwrap();
+        let mut buf = [0u8; 32];
+        let (n, peer) = a.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+        assert_eq!(peer, b_addr);
+        let _ = a_addr;
+
+        responder.await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn tcp_socket_raw_fd_roundtrip_still_binds_and_listens() {
+    use rusty_tokio::io::TcpSocket;
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = TcpSocket::new_v4().unwrap();
+        assert!(socket.as_raw_fd() >= 0);
+        let fd = socket.into_raw_fd();
+        let socket = unsafe { TcpSocket::from_raw_fd(fd) };
+
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(128).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = rusty_tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _client = TcpStream::connect(addr).await.unwrap();
+        server.await.unwrap();
+    });
+}

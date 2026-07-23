@@ -1,5 +1,5 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
-use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo};
+use super::reactor::{poll_io, ready_io, Interest, Reactor, ScheduledIo, TryCloneIo};
 use super::socket::{self, from_platform_err};
 use crate::runtime::Handle;
 use std::io;
@@ -73,6 +73,49 @@ impl UnixListener {
 impl Drop for UnixListener {
     fn drop(&mut self) {
         self.reactor.deregister(self.inner.as_raw_fd());
+    }
+}
+
+// Unlike `TcpListener`/`UdpSocket` (`io/tcp.rs`/`io/udp.rs`), there's no
+// existing `from_std`/`into_std` to build these on here -- built
+// directly on `PlatformUnixListener`'s own `AsFd`/`AsRawFd`/
+// `From<OwnedFd>` instead, the same primitives `bind` and `Drop` above
+// already use. `IntoRawFd` dup(2)s (`try_clone_io`) rather than
+// transferring the exact same fd, for the same reason `TcpListener::
+// into_std` does -- see that method's own docs.
+impl std::os::fd::AsFd for UnixListener {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+impl std::os::fd::AsRawFd for UnixListener {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl std::os::fd::FromRawFd for UnixListener {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let inner = PlatformUnixListener::from(owned);
+        inner
+            .set_nonblocking(true)
+            .expect("failed to set the adopted fd non-blocking");
+        let reactor = Handle::current().shared.reactor.clone();
+        let io = reactor
+            .register(inner.as_raw_fd())
+            .expect("failed to register raw fd with the reactor");
+        UnixListener { inner, io, reactor }
+    }
+}
+
+impl std::os::fd::IntoRawFd for UnixListener {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.inner
+            .try_clone_io()
+            .expect("failed to duplicate fd")
+            .into_raw_fd()
     }
 }
 
@@ -197,6 +240,41 @@ impl UnixStream {
 impl Drop for UnixStream {
     fn drop(&mut self) {
         self.reactor.deregister(self.inner.as_raw_fd());
+    }
+}
+
+// See `UnixListener`'s equivalent impls above.
+impl std::os::fd::AsFd for UnixStream {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+impl std::os::fd::AsRawFd for UnixStream {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl std::os::fd::FromRawFd for UnixStream {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let inner = PlatformUnixStream::from(owned);
+        inner
+            .set_nonblocking(true)
+            .expect("failed to set the adopted fd non-blocking");
+        let reactor = Handle::current().shared.reactor.clone();
+        UnixStream::from_accepted(inner, reactor)
+            .expect("failed to register raw fd with the reactor")
+    }
+}
+
+impl std::os::fd::IntoRawFd for UnixStream {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.inner
+            .try_clone_io()
+            .expect("failed to duplicate fd")
+            .into_raw_fd()
     }
 }
 

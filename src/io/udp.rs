@@ -125,3 +125,68 @@ impl Drop for UdpSocket {
         self.reactor.deregister(self.inner.as_raw_io());
     }
 }
+
+// See `TcpListener`'s equivalent impls (`io/tcp.rs`) for why these are
+// plain delegation and why `FromRawFd`/`IntoRawFd` reuse `from_std`/
+// `into_std`.
+#[cfg(unix)]
+impl std::os::fd::AsFd for UdpSocket {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for UdpSocket {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::FromRawFd for UdpSocket {
+    unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
+        let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+        UdpSocket::from_std(std_socket).expect("failed to register raw fd with the reactor")
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::IntoRawFd for UdpSocket {
+    fn into_raw_fd(self) -> std::os::fd::RawFd {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for UdpSocket {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        self.inner.as_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for UdpSocket {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.inner.as_raw_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::FromRawSocket for UdpSocket {
+    unsafe fn from_raw_socket(socket: std::os::windows::io::RawSocket) -> Self {
+        let std_socket = unsafe { std::net::UdpSocket::from_raw_socket(socket) };
+        UdpSocket::from_std(std_socket).expect("failed to register raw socket with the reactor")
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::IntoRawSocket for UdpSocket {
+    fn into_raw_socket(self) -> std::os::windows::io::RawSocket {
+        self.into_std()
+            .expect("failed to convert back to a std socket")
+            .into_raw_socket()
+    }
+}
