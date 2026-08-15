@@ -7,6 +7,36 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Hand-roll `rusty_tokio-macros` on raw `proc_macro`
+**2026-08-15** · [#268](https://github.com/baileyrd/rusty_tokio/issues/268) · PR pending
+
+- **Changed:** `rusty_tokio-macros` no longer depends on `syn` (with
+  `features = ["full"]`), `quote`, or `proc-macro2`. It now builds on the
+  compiler-provided `proc_macro` crate alone, and has **no dependencies at all**.
+- **Why it's tractable here** when it usually isn't: the macro *rejects*
+  generics and arguments rather than parsing them, so there is no arbitrary
+  signature to handle — only to detect and error on. What remains is a short
+  walk over a token list.
+- **Span fidelity preserved.** Everything originating with the caller
+  (attributes, visibility, name, return type, body) is re-emitted as the
+  original `TokenTree`s rather than stringified and re-parsed, so a type error
+  inside an annotated function body still points at the user's own source.
+  Verified against a deliberate error: reported at the exact line and column.
+  All five diagnostics still land on the offending token.
+- **Added:** 7 unit tests in the macro crate (it had none) plus 4 integration
+  tests covering attribute preservation, a trailing comma, a suffixed integer
+  literal, and a non-`main` return type.
+- **This does NOT reduce the build's crate count, and the issue overstated that
+  it would.** `syn`, `quote`, and `proc-macro2` are still compiled, pulled in by
+  `platform` → `thiserror` → `thiserror-impl`. The lockfile stays at 38
+  packages. What this change actually buys is one fewer dependency *this repo
+  chooses to take*, and a precondition: if `rustils` ever drops `thiserror`,
+  these three leave the graph entirely — which they could not while this crate
+  named them directly. The remaining lever is in `rustils`, not here.
+- **Cost, stated plainly:** roughly 250 lines of hand-rolled token parsing to
+  maintain in place of three widely-audited crates. Whether that trade is worth
+  it given the point above is a judgment call, not something the audit settles.
+
 ## Gate `bytes` behind a Cargo feature
 **2026-08-15** · [#267](https://github.com/baileyrd/rusty_tokio/issues/267) · PR pending
 

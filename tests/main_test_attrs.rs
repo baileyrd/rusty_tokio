@@ -40,3 +40,40 @@ async fn many_concurrent_spawns_all_complete() {
     }
     assert_eq!(sum, (0..20).sum());
 }
+
+// The macro re-emits the caller's own attributes ahead of the generated
+// body, so an attribute written below the `#[rusty_tokio::test]` line has
+// to survive the rewrite. `should_panic` is a load-bearing choice here:
+// it only works if the attribute actually lands on the generated `fn`, so
+// this fails loudly rather than silently if attributes get dropped.
+#[rusty_tokio::test]
+#[should_panic(expected = "boom")]
+async fn attributes_below_the_macro_are_preserved() {
+    panic!("boom");
+}
+
+// A trailing comma in the argument list parses the same as none.
+#[rusty_tokio::test(worker_threads = 2)]
+async fn accepts_a_trailing_comma_in_the_argument_list() {
+    let (tx, rx) = oneshot::channel::<u8>();
+    rusty_tokio::spawn(async move {
+        let _ = tx.send(7);
+    });
+    assert_eq!(rx.await.unwrap(), 7);
+}
+
+// Integer literals keep their Rust spelling, so a suffixed or
+// underscore-separated count has to parse the same as a bare one.
+#[rusty_tokio::test(worker_threads = 2usize)]
+async fn accepts_a_suffixed_worker_threads_literal() {
+    assert_eq!(rusty_tokio::spawn(async { 1 + 1 }).await.unwrap(), 2);
+}
+
+// Not `fn main`, but still a return type: the macro has to carry `-> T`
+// across from the original signature rather than assume `()`.
+#[rusty_tokio::test]
+async fn propagates_an_error_return_type() -> Result<(), std::num::ParseIntError> {
+    let parsed: i32 = "41".parse()?;
+    assert_eq!(parsed + 1, 42);
+    Ok(())
+}

@@ -8,7 +8,11 @@ license = "MIT"
 [lib]
 proc-macro = true
 
+# No dependencies. This crate used to pull `syn` (with `features =
+# ["full"]`), `quote`, and `proc-macro2`; it now builds on the
+# compiler-provided `proc_macro` crate alone. See the crate docs' "Why no
+# syn/quote/proc-macro2" section for why that trade came out differently
+# here than it does for most proc-macro crates -- the short version is that
+# this macro rejects generics and arguments rather than parsing them, so
+# there is no arbitrary signature to parse. Issue #268.
 [dependencies]
-syn = { version = "2", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"

@@ -58,10 +58,47 @@ build, which is the part that matters for a constrained-network consumer.
 Size S/M: the 13 call sites are provided methods on ext traits plus inherent
 methods on `UdpSocket`/`TcpStream`, all `cfg`-gateable.
 
+## Correction found during implementation (#268)
+
+The `syn`/`quote`/`proc-macro2` row above called this "the only row with a real
+path to elimination." That was **wrong**, and the audit is left standing with
+the correction rather than quietly edited.
+
+Removing the three from `rusty_tokio-macros` does not remove them from the
+build. `cargo tree -i syn` after the change:
+
+```
+syn v2.0.119
+└── thiserror-impl v1.0.69 (proc-macro)
+    └── thiserror v1.0.69
+        └── platform v0.27.0 (rustils)
+            └── rusty_tokio v0.2.0
+```
+
+The lockfile stays at 38 packages either way. The direct-dependencies-only scope
+this audit ran under (the skill's default) is exactly what hid this: a row can
+look eliminable at the direct level while remaining in the graph transitively.
+
+What the change is still worth: one fewer dependency this repo chooses, and a
+precondition for real elimination — while `rusty_tokio-macros` named `syn`
+directly, no amount of work in `rustils` could have removed it. The remaining
+lever is `thiserror` in `rustils`' `platform` crate, a different repo and a
+separate decision.
+
+**Follow-up worth its own audit:** run this same pass over `rustils`, scoped to
+`thiserror`. That single dependency is what keeps `syn`, `quote`,
+`proc-macro2`, and `unicode-ident` in every consumer of the platform layer.
+
 ## Bottom line
 
-Of six audited external dependencies, **one is a genuine drop candidate**
-(the `syn`/`quote`/`proc-macro2` trio). Three are interop contracts where
-the external crate is the whole point of the dependency, and two are
-documented decisions with benchmark or verification-tooling rationale that
-this audit found no reason to overturn — no internal repo covers either.
+Of six audited external dependencies, **none can actually be removed from the
+build today**. Three are interop contracts where the external crate is the whole
+point of the dependency, two are documented decisions with benchmark or
+verification-tooling rationale that this audit found no reason to overturn, and
+the sixth — the `syn`/`quote`/`proc-macro2` trio — turned out to be reachable
+transitively regardless (see the correction above).
+
+The two changes that did land are real but narrower than "dropping a
+dependency": `bytes` moved out of the default build (#267), and this repo
+stopped naming the proc-macro trio directly (#268), which is what makes their
+eventual removal possible from `rustils`' side.
