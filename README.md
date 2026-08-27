@@ -1,5 +1,13 @@
 # rusty_tokio
 
+> **This repo has moved.** `rusty_tokio` now lives at
+> [`crates/rusty_tokio`](https://github.com/Rusty-Mill/rusty_mill/tree/main/crates/rusty_tokio)
+> in the [`rusty_mill`](https://github.com/Rusty-Mill/rusty_mill) monorepo,
+> merged in with its full commit history via `git subtree`. This repo is
+> kept for historical reference (issues, PRs, prior releases) but is no
+> longer where development happens -- open new issues and PRs against
+> `rusty_mill` instead.
+
 A hand-rolled async runtime for Rust, built from scratch on `std` -- no
 `tokio`, no `mio`. It exists to actually understand how an async runtime
 works, not to replace tokio.
